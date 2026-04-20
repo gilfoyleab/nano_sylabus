@@ -1,0 +1,66 @@
+import type { AppRole, StudentProfile } from "@/lib/types";
+
+export function isProfileComplete(profile: Pick<
+  StudentProfile,
+  "fullName" | "college" | "grade" | "targetGrade" | "languagePref"
+> | null) {
+  if (!profile) return false;
+  return Boolean(
+    profile.fullName.trim() &&
+      profile.college.trim() &&
+      profile.grade.trim() &&
+      profile.targetGrade.trim() &&
+      profile.languagePref,
+  );
+}
+
+export function resolveAccess(input: {
+  pathname: string;
+  hasUser: boolean;
+  onboarded: boolean;
+  role: AppRole;
+}) {
+  const { pathname, hasUser, onboarded, role } = input;
+  const isAdminRoute = pathname.startsWith("/admin");
+  const isStudentRoute = pathname.startsWith("/app");
+  const isOnboarding = pathname === "/onboarding";
+  const isGuestPage = pathname === "/login" || pathname === "/signup";
+
+  if (isAdminRoute) {
+    if (!hasUser) return { allow: false as const, redirectTo: "/login", includeNext: true };
+    if (role !== "admin") {
+      return {
+        allow: false as const,
+        redirectTo: onboarded ? "/app/chat" : "/onboarding",
+        includeNext: false,
+      };
+    }
+    return { allow: true as const };
+  }
+
+  if (!hasUser && (isStudentRoute || isOnboarding)) {
+    return { allow: false as const, redirectTo: "/login", includeNext: true };
+  }
+
+  if (hasUser && isGuestPage) {
+    return {
+      allow: false as const,
+      redirectTo: role === "admin" ? "/admin/payments" : onboarded ? "/app/chat" : "/onboarding",
+      includeNext: false,
+    };
+  }
+
+  if (hasUser && role !== "admin" && isStudentRoute && !onboarded) {
+    return { allow: false as const, redirectTo: "/onboarding", includeNext: false };
+  }
+
+  if (hasUser && isOnboarding && (onboarded || role === "admin")) {
+    return {
+      allow: false as const,
+      redirectTo: role === "admin" ? "/admin/payments" : "/app/chat",
+      includeNext: false,
+    };
+  }
+
+  return { allow: true as const };
+}
