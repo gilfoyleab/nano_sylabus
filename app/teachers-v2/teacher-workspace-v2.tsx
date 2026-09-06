@@ -2276,15 +2276,17 @@ export function CommunitiesView({
                 : "Open a community you created to view its overview and members. Manage its subjects from Create Subjects."}
             </p>
           </div>
-          <Link
-            href="/communities?create=1"
-            className={cn(
-              "inline-flex min-h-10 items-center justify-center rounded-lg bg-text-primary px-4 text-sm font-medium text-text-inverse transition hover:opacity-90",
-              interactive,
-            )}
-          >
-            Create community
-          </Link>
+          {!subjectsMode ? (
+            <Link
+              href="/communities?create=1"
+              className={cn(
+                "inline-flex min-h-10 items-center justify-center rounded-lg bg-text-primary px-4 text-sm font-medium text-text-inverse transition hover:opacity-90",
+                interactive,
+              )}
+            >
+              Create community
+            </Link>
+          ) : null}
         </header>
         {subjectsMode ? (
           <Link
@@ -2334,21 +2336,35 @@ export function CommunitiesView({
           </div>
         ) : (
           <section className="mt-6 rounded-xl border border-dashed border-border bg-bg-primary px-6 py-14 text-center">
-            <h2 className="font-display text-xl font-semibold">Create your first community</h2>
+            <h2 className="font-display text-xl font-semibold">
+              {subjectsMode ? "No communities available" : "Create your first community"}
+            </h2>
             <p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-text-secondary">
               {subjectsMode
-                ? "Create a community first, then organise its subjects by semester here. Your reusable subject library is still available."
+                ? "Create a community from My Communities, then return here to organise its subjects by semester. Your reusable subject library is still available."
                 : "Once created, every community you own will appear here as a separate admin workspace."}
             </p>
-            <Link
-              href="/communities?create=1"
-              className={cn(
-                "mt-5 inline-flex min-h-10 items-center rounded-lg bg-text-primary px-4 text-sm font-medium text-text-inverse",
-                interactive,
-              )}
-            >
-              Create community
-            </Link>
+            {subjectsMode ? (
+              <Link
+                href="/teachers?view=communities"
+                className={cn(
+                  "mt-5 inline-flex min-h-10 items-center rounded-lg bg-text-primary px-4 text-sm font-medium text-text-inverse",
+                  interactive,
+                )}
+              >
+                Open My Communities →
+              </Link>
+            ) : (
+              <Link
+                href="/communities?create=1"
+                className={cn(
+                  "mt-5 inline-flex min-h-10 items-center rounded-lg bg-text-primary px-4 text-sm font-medium text-text-inverse",
+                  interactive,
+                )}
+              >
+                Create community
+              </Link>
+            )}
           </section>
         )}
       </>
