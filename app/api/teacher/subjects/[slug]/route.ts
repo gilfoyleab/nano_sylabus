@@ -18,6 +18,40 @@ type LocalDocumentMirror = {
   storage_path?: unknown;
 };
 
+type CommunitySubjectLink = {
+  id?: unknown;
+  folder_path?: unknown;
+};
+
+async function findCommunitySubjectLinks(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  teacherId: string,
+  subjectSlug: string,
+) {
+  const result = await admin
+    .from("community_subjects")
+    .select("id,folder_path")
+    .eq("teacher_id", teacherId)
+    .eq("external_subject_slug", subjectSlug);
+  if (result.error) throw result.error;
+  return (result.data || []) as CommunitySubjectLink[];
+}
+
+async function deleteCommunitySubjectLinks(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  teacherId: string,
+  subjectSlug: string,
+) {
+  const result = await admin
+    .from("community_subjects")
+    .delete()
+    .eq("teacher_id", teacherId)
+    .eq("external_subject_slug", subjectSlug)
+    .select("id");
+  if (result.error) throw result.error;
+  return result.data?.length || 0;
+}
+
 /**
  * Remove the local mirrors that make a teacher subject appear in the workspace.
  *
@@ -119,20 +153,26 @@ export async function DELETE(request: Request, { params }: RouteContext) {
 
     let admin: ReturnType<typeof createSupabaseAdminClient> | null = null;
     let localProfile: { subject_slug?: unknown; folder_path?: unknown } | null = null;
+    let communityLinks: CommunitySubjectLink[] | null = null;
     if (!subject) {
-      // A previous failed delete could leave the local profile behind after
-      // the operator collection has already removed the subject. Treat that
-      // as an idempotent delete so the workspace card can still be removed.
+      // A previous partial delete can leave either the local profile or a
+      // community-semester placement behind after the operator subject is
+      // already gone. Treat both cases as an idempotent delete so stale cards
+      // can still be repaired by retrying the same request.
       admin = createSupabaseAdminClient();
-      const localProfileResult = await admin
-        .from("teacher_subject_profiles")
-        .select("subject_slug,folder_path")
-        .eq("teacher_id", teacher.id)
-        .eq("subject_slug", trimmedSlug)
-        .maybeSingle();
+      const [localProfileResult, linkedCommunitySubjects] = await Promise.all([
+        admin
+          .from("teacher_subject_profiles")
+          .select("subject_slug,folder_path")
+          .eq("teacher_id", teacher.id)
+          .eq("subject_slug", trimmedSlug)
+          .maybeSingle(),
+        findCommunitySubjectLinks(admin, teacher.id, trimmedSlug),
+      ]);
       if (localProfileResult.error) throw localProfileResult.error;
       localProfile = localProfileResult.data;
-      if (!localProfile) {
+      communityLinks = linkedCommunitySubjects;
+      if (!localProfile && !communityLinks.length) {
         return NextResponse.json(
           { error: "Subject not found in this teacher collection." },
           { status: 404 },
@@ -147,7 +187,9 @@ export async function DELETE(request: Request, { params }: RouteContext) {
         : ""
       : typeof localProfile?.folder_path === "string"
         ? localProfile.folder_path.trim()
-        : "";
+        : typeof communityLinks?.[0]?.folder_path === "string"
+          ? communityLinks[0].folder_path.trim()
+          : "";
     if (deleteFiles) {
       const unsafeFolder = !folderPath || folderPath.startsWith("/") || folderPath.includes("\\")
         || folderPath.split("/").some((part) => !part || part === "." || part === "..");
@@ -222,6 +264,11 @@ export async function DELETE(request: Request, { params }: RouteContext) {
     );
 
     const detachedCourseIds = await detachTeacherSubjectFromCourses(db, teacher.id, resolvedSlug);
+    // A community subject is a placement of this creator subject, not an
+    // independent copy. Removing the source must therefore remove every
+    // semester placement too; otherwise the teacher and students keep seeing
+    // a card that opens a subject which no longer exists.
+    const communitiesUpdated = await deleteCommunitySubjectLinks(db, teacher.id, resolvedSlug);
     const localFilesDeleted = await deleteLocalSubjectMetadata(
       db,
       teacher.id,
@@ -233,6 +280,7 @@ export async function DELETE(request: Request, { params }: RouteContext) {
       deleted: true,
       filesDeleted: deleteFiles,
       coursesUpdated: detachedCourseIds.length,
+      communitiesUpdated,
       localFilesDeleted,
     });
   } catch (error) {
