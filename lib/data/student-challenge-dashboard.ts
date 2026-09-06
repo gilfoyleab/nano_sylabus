@@ -15,9 +15,8 @@ import { type PracticeTopic, type PracticeTopicStatus } from "@/lib/tenant/clien
 import { getTeacherPracticeTopics } from "@/lib/teacher-app/client";
 import { readCourseLearningTopics } from "@/lib/data/community-learning-topics";
 import {
-  listCreatorPrivateSubjectAccess,
+  getStudentCommunityLearningScope,
   listStudentCommunitySubjectAccess,
-  listStudentCourseSubjects,
 } from "@/lib/student-courses";
 
 export type ChallengeDashboardScope = {
@@ -56,6 +55,12 @@ export type ChallengeLeaderboard = {
 };
 
 export type StudentChallengeDashboard = {
+  community: {
+    id: string;
+    slug: string;
+    name: string;
+    courseId: string | null;
+  } | null;
   scope: {
     courseId: string;
     subjectSlug: string;
@@ -75,6 +80,7 @@ export type StudentChallengeDashboard = {
   practiceScoreChange: number | null;
   currentStreak: number;
   todayCompleted: boolean;
+  todayCompletedCount: number;
   passedThisMonth: number;
   passedThisWeek: number;
   averageTestScore: number | null;
@@ -100,27 +106,10 @@ type SubjectAccess = {
   folderPath?: string;
 };
 
-type ChallengeMetricsRow = {
-  has_practice_history: boolean;
-  today_completed: boolean;
-  current_streak: number | string;
-  current_streak_rank: number | string | null;
-  personal_best_streak: number | string;
-  platform_best_streak: number | string;
-  days_from_best: number | string;
-  practice_per_day: number | string;
-  practice_per_day_rank: number | string | null;
-  top_practice_per_day: number | string;
-  passed_this_week: number | string;
-  passed_this_month: number | string;
-  attempts_last_30: number | string;
-  passed_last_30: number | string;
-  practice_score_change: number | string | null;
-};
-
 type ChallengeMetrics = {
   hasPracticeHistory: boolean;
   todayCompleted: boolean;
+  todayCompletedCount: number;
   currentStreak: number;
   passedThisMonth: number;
   passedThisWeek: number;
@@ -129,15 +118,6 @@ type ChallengeMetrics = {
   practiceScoreChange: number | null;
   leaderboard: ChallengeLeaderboard;
 };
-
-function number(value: number | string | null | undefined) {
-  const parsed = Number(value ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function optionalNumber(value: number | string | null | undefined) {
-  return value === null || value === undefined ? null : number(value);
-}
 
 function nepaliDateKey(value: string | Date) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -213,6 +193,9 @@ export function calculateAttemptMetrics(
     todayCompleted: attempts.some(
       (attempt) => nepaliDateKey(attempt.createdAt) === today && passed(attempt),
     ),
+    todayCompletedCount: attempts.filter(
+      (attempt) => nepaliDateKey(attempt.createdAt) === today && passed(attempt),
+    ).length,
     currentStreak: currentStreak(
       new Set(attempts.filter(passed).map((attempt) => nepaliDateKey(attempt.createdAt))),
       now,
@@ -228,52 +211,124 @@ export function calculateAttemptMetrics(
   };
 }
 
-async function loadChallengeMetrics(userId: string): Promise<ChallengeMetrics> {
-  const admin = createSupabaseAdminClient();
+function bestStreak(activeDays: Set<string>) {
+  const days = [...activeDays].sort();
+  let best = 0;
+  let run = 0;
+  let previous = "";
+  for (const day of days) {
+    run = previous && dateBefore(day) === previous ? run + 1 : 1;
+    best = Math.max(best, run);
+    previous = day;
+  }
+  return best;
+}
 
-  // An older deployment of the RPC counted arbitrary practice attempts as
-  // challenges. Never call it unless the durable challenge table exists.
-  const { error: schemaError } = await admin
-    .from("student_challenges")
-    .select("id")
-    .eq("user_id", userId)
-    .limit(1);
-  if (isMissingChallengeTable(schemaError)) {
-    throw new Error(
-      "Challenge metrics are unavailable because the student challenge migration has not been applied.",
+function rankedPosition(values: Map<string, number>, userId: string) {
+  const viewerValue = values.get(userId) ?? 0;
+  if (viewerValue <= 0) return null;
+  const higherValues = new Set([...values.values()].filter((value) => value > viewerValue));
+  return higherValues.size + 1;
+}
+
+function emptyChallengeMetrics(): ChallengeMetrics {
+  return {
+    hasPracticeHistory: false,
+    todayCompleted: false,
+    todayCompletedCount: 0,
+    currentStreak: 0,
+    passedThisMonth: 0,
+    passedThisWeek: 0,
+    passRateLast30Days: null,
+    practicePerDay: 0,
+    practiceScoreChange: null,
+    leaderboard: {
+      currentStreakRank: null,
+      bestStreak: 0,
+      platformBestStreak: 0,
+      daysFromBest: 0,
+      practicePerDayRank: null,
+      topPracticePerDay: 0,
+    },
+  };
+}
+
+async function loadScopedChallengeMetrics(
+  userId: string,
+  communityId: string,
+  courseId: string,
+  attempts: Attempt[],
+): Promise<ChallengeMetrics> {
+  const admin = createSupabaseAdminClient();
+  const [{ data, error }, membershipResult] = await Promise.all([
+    admin
+      .from("student_challenges")
+      .select("user_id,status,completed_at")
+      .eq("course_id", courseId)
+      .eq("status", "completed"),
+    admin
+      .from("community_memberships")
+      .select("user_id")
+      .eq("community_id", communityId)
+      .eq("role", "member")
+      .eq("status", "active"),
+  ]);
+  if (isMissingChallengeTable(error)) return emptyChallengeMetrics();
+  if (error) throw error;
+  if (membershipResult.error) throw membershipResult.error;
+  const activeMemberIds = new Set(
+    (membershipResult.data ?? []).map((row) => String(row.user_id || "")).filter(Boolean),
+  );
+
+  const completionDatesByUser = new Map<string, string[]>();
+  for (const row of data ?? []) {
+    if (!row.completed_at) continue;
+    const memberId = String(row.user_id || "");
+    if (!memberId || !activeMemberIds.has(memberId)) continue;
+    const dates = completionDatesByUser.get(memberId) ?? [];
+    dates.push(nepaliDateKey(String(row.completed_at)));
+    completionDatesByUser.set(memberId, dates);
+  }
+  const today = nepaliDateKey(new Date());
+  const weekStart = daysAgo(6);
+  const monthStart = `${today.slice(0, 7)}-01`;
+  const streaks = new Map<string, number>();
+  const bestStreaks = new Map<string, number>();
+  const weeklyCompletions = new Map<string, number>();
+  for (const [memberId, dates] of completionDatesByUser) {
+    const activeDays = new Set(dates);
+    streaks.set(memberId, currentStreak(activeDays));
+    bestStreaks.set(memberId, bestStreak(activeDays));
+    weeklyCompletions.set(
+      memberId,
+      dates.filter((date) => date >= weekStart && date <= today).length,
     );
   }
-  if (schemaError) throw schemaError;
 
-  const { data, error } = await admin
-    .rpc("get_student_challenge_metrics", { target_user_id: userId })
-    .maybeSingle();
-
-  // Never turn a metrics outage into believable-looking zeroes. An empty
-  // account is represented by a real all-zero RPC row; an error must remain an
-  // error so the UI cannot present fabricated dashboard values.
-  if (error) throw error;
-  if (!data) throw new Error("The challenge metrics query returned no result.");
-  const row = data as ChallengeMetricsRow;
-  const recentAttempts = number(row.attempts_last_30);
-  const recentPassed = number(row.passed_last_30);
+  const viewerDates = completionDatesByUser.get(userId) ?? [];
+  const viewerAttempts = calculateAttemptMetrics(attempts);
+  const personalBest = bestStreaks.get(userId) ?? 0;
+  const platformBest = Math.max(0, ...bestStreaks.values());
+  const passedThisWeek = weeklyCompletions.get(userId) ?? 0;
+  const topWeekly = Math.max(0, ...weeklyCompletions.values());
 
   return {
-    hasPracticeHistory: Boolean(row.has_practice_history),
-    todayCompleted: Boolean(row.today_completed),
-    currentStreak: number(row.current_streak),
-    passedThisMonth: number(row.passed_this_month),
-    passedThisWeek: number(row.passed_this_week),
-    passRateLast30Days: recentAttempts > 0 ? (recentPassed / recentAttempts) * 100 : null,
-    practicePerDay: number(row.practice_per_day),
-    practiceScoreChange: optionalNumber(row.practice_score_change),
+    hasPracticeHistory: viewerDates.length > 0 || attempts.length > 0,
+    todayCompleted: viewerDates.includes(today),
+    todayCompletedCount: viewerDates.filter((date) => date === today).length,
+    currentStreak: streaks.get(userId) ?? 0,
+    passedThisMonth: viewerDates.filter((date) => date >= monthStart && date <= today).length,
+    passedThisWeek,
+    passRateLast30Days: viewerAttempts.passRateLast30Days,
+    practicePerDay: passedThisWeek / 7,
+    practiceScoreChange: viewerAttempts.practiceScoreChange,
     leaderboard: {
-      currentStreakRank: optionalNumber(row.current_streak_rank),
-      bestStreak: number(row.personal_best_streak),
-      platformBestStreak: number(row.platform_best_streak),
-      daysFromBest: number(row.days_from_best),
-      practicePerDayRank: optionalNumber(row.practice_per_day_rank),
-      topPracticePerDay: number(row.top_practice_per_day),
+      currentStreakRank: rankedPosition(streaks, userId),
+      bestStreak: personalBest,
+      platformBestStreak: platformBest,
+      daysFromBest: Math.max(0, platformBest - (streaks.get(userId) ?? 0)),
+      practicePerDayRank: rankedPosition(weeklyCompletions, userId),
+      topPracticePerDay: topWeekly / 7,
     },
   };
 }
@@ -372,17 +427,44 @@ export async function getStudentChallengeDashboard(
   completedChallengePage = 1,
   requestedScope?: ChallengeDashboardScope,
 ): Promise<StudentChallengeDashboard> {
-  const [mastery, courseSubjects, communitySubjects, privateSubjects, metrics, practiceAttempts] =
-    await Promise.all([
+  const [allMastery, allCommunitySubjects, communityScope, allPracticeAttempts] = await Promise.all(
+    [
       listTopicMastery(userId),
-      listStudentCourseSubjects(userId),
       listStudentCommunitySubjectAccess(userId),
-      listCreatorPrivateSubjectAccess(userId),
-      loadChallengeMetrics(userId),
+      getStudentCommunityLearningScope(userId),
       listPracticeAttempts(userId, 200),
-    ]);
+    ],
+  );
+  const currentCourseId = communityScope?.courseId ?? null;
+  const communitySubjects = currentCourseId
+    ? allCommunitySubjects.filter((subject) => subject.courseId === currentCourseId)
+    : [];
+  const mastery = currentCourseId
+    ? allMastery.filter((row) => row.courseId === currentCourseId)
+    : [];
+  const practiceAttempts = currentCourseId
+    ? allPracticeAttempts.filter((attempt) => attempt.courseId === currentCourseId)
+    : [];
+  const activeRequestedScope =
+    currentCourseId && requestedScope?.courseId === currentCourseId ? requestedScope : undefined;
+  const metrics =
+    communityScope && currentCourseId
+      ? await loadScopedChallengeMetrics(
+          userId,
+          communityScope.communityId,
+          currentCourseId,
+          practiceAttempts
+            .filter((attempt) => attempt.source === "challenge")
+            .map((attempt) => ({
+              totalScore: attempt.totalScore,
+              totalMarks: attempt.totalMarks,
+              createdAt: attempt.createdAt,
+              passed: attempt.passed,
+            })),
+        )
+      : emptyChallengeMetrics();
   const storedBySubject = masteryBySubject(mastery);
-  const accessibleSubjects = uniqueSubjects(courseSubjects, communitySubjects, privateSubjects);
+  const accessibleSubjects = uniqueSubjects(communitySubjects);
   const subjectOptions = accessibleSubjects
     .filter((subject) => subject.accessKind !== "owner-private")
     .map((subject) => ({
@@ -399,12 +481,12 @@ export async function getStudentChallengeDashboard(
       ),
     ),
   );
-  const subjects = requestedScope
+  const subjects = activeRequestedScope
     ? accessibleSubjects.filter(
         (subject) =>
-          subject.courseId === requestedScope.courseId &&
+          subject.courseId === activeRequestedScope.courseId &&
           normalizedSubjectSlug(subject.subjectSlug) ===
-            normalizedSubjectSlug(requestedScope.subjectSlug),
+            normalizedSubjectSlug(activeRequestedScope.subjectSlug),
       )
     : accessibleSubjects;
   const admin = createSupabaseAdminClient();
@@ -519,20 +601,24 @@ export async function getStudentChallengeDashboard(
         .map((result) => result.recommendations[position])
         .filter((value): value is ChallengeRecommendation => Boolean(value)),
     ),
-    { minimumRecommendationCount: requestedScope ? 3 : 0 },
+    // Assign the joined community its own three-card queue even when stale,
+    // unfinished rows from a previously joined community still exist.
+    { minimumRecommendationCount: currentCourseId ? 3 : 0 },
   );
   const accessibleChallenges = dailyChallenges.filter((challenge) =>
     accessibleScopeKeys.has(subjectScopeKey(challenge.courseId, challenge.subjectSlug)),
   );
-  const challenges = requestedScope
-    ? accessibleChallenges.filter((challenge) => challengeBelongsToScope(challenge, requestedScope))
+  const challenges = activeRequestedScope
+    ? accessibleChallenges.filter((challenge) =>
+        challengeBelongsToScope(challenge, activeRequestedScope),
+      )
     : accessibleChallenges;
-  const completedHistory = await listCompletedStudentChallenges(
-    userId,
-    completedChallengePage,
-    undefined,
-    requestedScope,
-  );
+  const completedHistory = currentCourseId
+    ? await listCompletedStudentChallenges(userId, completedChallengePage, undefined, {
+        courseId: currentCourseId,
+        subjectSlug: activeRequestedScope?.subjectSlug,
+      })
+    : { challenges: [], page: 1, total: 0, totalPages: 0 };
 
   const progress = metrics;
   const weekStart = daysAgo(6);
@@ -544,10 +630,10 @@ export async function getStudentChallengeDashboard(
       return attemptDay >= weekStart && attemptDay <= today;
     })
     .filter((attempt) =>
-      requestedScope
-        ? attempt.courseId === requestedScope.courseId &&
+      activeRequestedScope
+        ? attempt.courseId === activeRequestedScope.courseId &&
           normalizedSubjectSlug(attempt.subjectSlug) ===
-            normalizedSubjectSlug(requestedScope.subjectSlug)
+            normalizedSubjectSlug(activeRequestedScope.subjectSlug)
         : true,
     )
     .map((attempt) => Math.max(0, Math.min(100, (attempt.totalScore / attempt.totalMarks) * 100)));
@@ -562,11 +648,19 @@ export async function getStudentChallengeDashboard(
   );
 
   return {
-    scope: requestedScope
+    community: communityScope
       ? {
-          courseId: requestedScope.courseId,
-          subjectSlug: requestedScope.subjectSlug,
-          subjectName: subjectRows[0]?.name || requestedScope.subjectSlug,
+          id: communityScope.communityId,
+          slug: communityScope.communitySlug,
+          name: communityScope.communityName,
+          courseId: communityScope.courseId,
+        }
+      : null,
+    scope: activeRequestedScope
+      ? {
+          courseId: activeRequestedScope.courseId,
+          subjectSlug: activeRequestedScope.subjectSlug,
+          subjectName: subjectRows[0]?.name || activeRequestedScope.subjectSlug,
         }
       : null,
     subjects: subjectRows,
@@ -582,6 +676,7 @@ export async function getStudentChallengeDashboard(
     practiceScoreChange: progress.practiceScoreChange,
     currentStreak: progress.currentStreak,
     todayCompleted: progress.todayCompleted,
+    todayCompletedCount: progress.todayCompletedCount,
     passedThisMonth: progress.passedThisMonth,
     passedThisWeek: progress.passedThisWeek,
     averageTestScore,

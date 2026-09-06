@@ -3,6 +3,7 @@ import { ArrowRight, Building2 } from "lucide-react";
 import { CommunitySubjectExplorer } from "@/components/community-subject-explorer";
 import { SetAppShell } from "@/components/set-app-shell";
 import { requireOnboardedUser } from "@/lib/auth";
+import { selectStudentCommunity } from "@/lib/communities";
 import { getCommunity, listJoinedCommunities } from "@/lib/data/communities";
 import { getCommunitySubjectExplorerInsights } from "@/lib/data/community-subject-explorer";
 
@@ -11,9 +12,7 @@ export const dynamic = "force-dynamic";
 export default async function SubjectExplorerPage() {
   const { user } = await requireOnboardedUser();
   const communities = await listJoinedCommunities(user.id);
-  const joinedCommunity =
-    communities.find((community) => community.membership?.role === "member") ||
-    communities.find((community) => community.membership?.status === "active");
+  const joinedCommunity = selectStudentCommunity(communities);
   const community = joinedCommunity ? await getCommunity(joinedCommunity.slug, user.id) : null;
   const insights = community ? await getCommunitySubjectExplorerInsights(user.id, community) : {};
 
@@ -41,7 +40,8 @@ export default async function SubjectExplorerPage() {
             <Building2 className="size-10 text-text-muted" aria-hidden="true" />
             <h2 className="mt-4 font-display text-xl font-semibold">No subjects to explore yet</h2>
             <p className="mt-2 max-w-lg text-sm leading-6 text-text-secondary">
-              Join one community first. Its complete academic structure will appear here.
+              Join one community you do not manage. Its complete academic structure will appear
+              here; communities you created stay in your admin workspace.
             </p>
             <Link
               href="/communities"

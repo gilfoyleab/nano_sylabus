@@ -1066,19 +1066,21 @@ async function uploadTeacherDocument(file: File, path: string) {
 function Dialog({
   title,
   onClose,
+  closeDisabled = false,
   children,
 }: {
   title: string;
   onClose: () => void;
+  closeDisabled?: boolean;
   children: ReactNode;
 }) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !closeDisabled) onClose();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [closeDisabled, onClose]);
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center p-4">
@@ -1087,6 +1089,7 @@ function Dialog({
         aria-label="Close dialog"
         className="absolute inset-0 bg-black/45"
         onClick={onClose}
+        disabled={closeDisabled}
       />
       <section
         role="dialog"
@@ -1099,7 +1102,13 @@ function Dialog({
             {title}
           </h2>
           <span className="flex-1" />
-          <Button type="button" variant="outline" onClick={onClose} autoFocus>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onClose}
+            disabled={closeDisabled}
+            autoFocus
+          >
             Close
           </Button>
         </header>
@@ -2092,7 +2101,7 @@ export function TeacherWorkspaceV2({ teacherHandle }: { teacherHandle: string })
                 }),
               );
               setToast(
-                `${result.name} created and attached. Once indexing finishes, use Extract topics for challenges.${result.failedUploads.length ? ` ${result.failedUploads.length} file uploads failed; retry them from the source library.` : ""}`,
+                `${result.name} created as a draft. Once indexing finishes, publish the subject to extract topics and prepare member challenges.${result.failedUploads.length ? ` ${result.failedUploads.length} file uploads failed; retry them from the source library.` : ""}`,
               );
               return;
             }
@@ -2138,17 +2147,14 @@ export function TeacherWorkspaceV2({ teacherHandle }: { teacherHandle: string })
         <UploadDialog
           subject={selectedSubject}
           shelf={dialog.shelf}
-          chapterFolders={sourceTreeFolderPaths(
-            workspace.sourceTree,
-            selectedSubject,
-            dialog.shelf,
-          )}
           onClose={() => setDialog(null)}
-          onUploaded={async ({ message, jobId, fileName }) => {
+          onUploaded={async ({ message, jobs }) => {
             setDialog(null);
             setToast(message);
             await loadWorkspace();
-            if (jobId) void pollIndexingJob(jobId, fileName);
+            jobs.forEach(({ jobId, fileName }) => {
+              if (jobId) void pollIndexingJob(jobId, fileName);
+            });
           }}
         />
       ) : null}
@@ -4499,7 +4505,6 @@ function ClassroomDetailView({
             <UploadDialog
               subject={subject}
               shelf="Notes"
-              chapterFolders={[]}
               onClose={() => setShowUploadMaterialModal(false)}
               onUploaded={async (result) => {
                 setShowUploadMaterialModal(false);
@@ -9795,7 +9800,7 @@ function CreateSubjectDialog({
           </div>
           <p className="mt-5 border-t border-border pt-5 text-sm leading-6 text-text-secondary">
             {communityContext
-              ? "This subject will be attached to the selected community semester. Stay on Create Subjects while files are indexed, then use Extract topics for challenges."
+              ? "This subject will be attached to the selected community semester as a draft. After files are indexed, publish it to extract topics and prepare member challenges."
               : "Save this subject in your library, then add it to a community semester to make it available to that community’s members."}
           </p>
           <div className="mt-6 flex justify-end gap-2 border-t border-border pt-5">
@@ -10228,17 +10233,19 @@ function SelectedFileRows({
   label,
   files,
   onRemove,
+  disabled = false,
 }: {
   label: string;
   files: File[];
   onRemove: (index: number) => void;
+  disabled?: boolean;
 }) {
   if (!files.length) return null;
   return (
     <div className="mt-3 divide-y divide-border overflow-hidden rounded-lg border border-border bg-bg-secondary/70">
       {files.map((file, index) => (
         <div
-          key={`${file.name}-${file.lastModified}`}
+          key={`${file.name}-${file.size}-${file.lastModified}`}
           className="flex min-h-12 items-center gap-3 bg-bg-primary px-3 py-2"
         >
           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-success/15 text-xs text-success">
@@ -10247,7 +10254,12 @@ function SelectedFileRows({
           <span className="rounded-full border border-border px-2.5 py-1 text-xs">{label}</span>
           <span className="min-w-0 flex-1 truncate text-sm">{file.name}</span>
           <span className="text-xs text-text-muted">{fileSizeLabel(file)}</span>
-          <Button type="button" variant="outline" onClick={() => onRemove(index)}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onRemove(index)}
+            disabled={disabled}
+          >
             Remove
           </Button>
         </div>
@@ -10344,21 +10356,23 @@ function CreateFolderDialog({
 function UploadDialog({
   subject,
   shelf,
-  chapterFolders,
   onClose,
   onUploaded,
 }: {
   subject: TeacherSubject;
   shelf: Shelf;
-  chapterFolders: string[];
   onClose: () => void;
-  onUploaded: (result: { message: string; jobId: string; fileName: string }) => void;
+  onUploaded: (result: {
+    message: string;
+    jobs: Array<{ jobId: string; fileName: string }>;
+  }) => void;
 }) {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const shelfRoot = `${subject.folderPath}/${shelf}`;
-  const [destination, setDestination] = useState(shelfRoot);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [uploadStatus, setUploadStatus] = useState({ current: 0, total: 0 });
+  const completedJobs = useRef<Array<{ jobId: string; fileName: string }>>([]);
   const accept =
     shelf === "Syllabus"
       ? ".pdf,.doc,.docx,.txt,.md"
@@ -10366,27 +10380,56 @@ function UploadDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file) {
-      setError("Choose a file first.");
+    if (!files.length) {
+      setError("Choose one or more files first.");
       return;
     }
     setBusy(true);
     setError("");
-    try {
-      const payload = await uploadTeacherDocument(file, destination);
-      onUploaded({
-        message: text(payload.previewWarning) || `${file.name} uploaded and indexing started`,
-        jobId: text(payload.jobId),
-        fileName: file.name,
-      });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not upload the file.");
-      setBusy(false);
+    setUploadStatus({ current: 0, total: files.length });
+    const failed: Array<{ file: File; error: string }> = [];
+    const warnings: string[] = [];
+
+    for (const [index, file] of files.entries()) {
+      setUploadStatus({ current: index + 1, total: files.length });
+      try {
+        const payload = await uploadTeacherDocument(file, shelfRoot);
+        completedJobs.current.push({ jobId: text(payload.jobId), fileName: file.name });
+        const warning = text(payload.previewWarning);
+        if (warning) warnings.push(`${file.name}: ${warning}`);
+      } catch (caught) {
+        failed.push({
+          file,
+          error: caught instanceof Error ? caught.message : "Could not upload this file.",
+        });
+      }
     }
+
+    if (failed.length) {
+      setFiles(failed.map((item) => item.file));
+      setError(
+        `${failed.length} file${failed.length === 1 ? "" : "s"} could not be uploaded:\n${failed
+          .map((item) => `${item.file.name}: ${item.error}`)
+          .join(
+            "\n",
+          )}\n\nSuccessful files are already indexing. Retry to upload only the files listed here.`,
+      );
+      setBusy(false);
+      setUploadStatus({ current: 0, total: 0 });
+      return;
+    }
+
+    const uploadedCount = completedJobs.current.length;
+    onUploaded({
+      message: warnings.length
+        ? warnings.join("\n")
+        : `${uploadedCount} file${uploadedCount === 1 ? "" : "s"} uploaded and indexing started`,
+      jobs: completedJobs.current,
+    });
   }
 
   return (
-    <Dialog title={`Upload to ${shelf}`} onClose={onClose}>
+    <Dialog title={`Upload to ${shelf}`} onClose={onClose} closeDisabled={busy}>
       <div className="rounded-lg border border-border bg-bg-secondary p-4">
         <p className="font-medium">{titleCase(subject.name)}</p>
         <p className="mt-1 break-all font-mono text-xs text-text-muted">
@@ -10394,52 +10437,74 @@ function UploadDialog({
         </p>
       </div>
       <form className="mt-5" onSubmit={submit}>
-        <label htmlFor="teacher-upload-destination" className="text-sm font-medium">
-          Upload destination
-        </label>
-        <select
-          id="teacher-upload-destination"
-          value={destination}
-          className={cn(inputClass, "mt-2")}
-          onChange={(event) => setDestination(event.target.value)}
-        >
-          <option value={shelfRoot}>{shelf} root</option>
-          {chapterFolders.map((path) => (
-            <option key={path} value={path}>
-              {path.slice(`${shelfRoot}/`.length)}
-            </option>
-          ))}
-        </select>
-        <p className="mt-2 text-xs text-text-muted">
-          Choose the shelf root or one of its chapter folders before indexing.
-        </p>
-        <label htmlFor="teacher-upload-file" className="mt-5 block text-sm font-medium">
-          Choose one file
+        <label htmlFor="teacher-upload-file" className="block text-sm font-medium">
+          Choose files
         </label>
         <input
           id="teacher-upload-file"
           type="file"
           accept={accept}
+          multiple
+          disabled={busy}
           className={cn(
             inputClass,
-            "mt-2 file:mr-3 file:border-0 file:bg-transparent file:text-sm file:font-medium",
+            "mt-2 min-w-0 max-w-full overflow-hidden text-ellipsis file:mr-3 file:border-0 file:bg-transparent file:text-sm file:font-medium",
           )}
           onChange={(event) => {
-            const selected = event.target.files?.[0] || null;
-            const sizeError = selected ? teacherUploadSizeError(selected.size) : "";
-            setFile(sizeError ? null : selected);
-            setError(sizeError);
-            if (sizeError) event.currentTarget.value = "";
+            const selected = Array.from(event.target.files || []);
+            const accepted: File[] = [];
+            const rejected: string[] = [];
+
+            selected.forEach((file) => {
+              const sizeError = teacherUploadSizeError(file.size);
+              if (sizeError) rejected.push(`${file.name}: ${sizeError}`);
+              else accepted.push(file);
+            });
+
+            setFiles(accepted);
+            setError(rejected.join("\n"));
+            event.currentTarget.value = "";
           }}
           aria-invalid={error ? "true" : undefined}
           aria-describedby={error ? "teacher-upload-error" : "teacher-upload-hint"}
         />
         <p id="teacher-upload-hint" className="mt-2 text-xs text-text-muted">
-          The file uploads to the teacher collection, queues indexing, and keeps a private preview
-          copy. Maximum file size: {TEACHER_UPLOAD_MAX_LABEL}.
+          Each file uploads to the teacher collection, queues indexing, and keeps a private preview
+          copy. Maximum size per file: {TEACHER_UPLOAD_MAX_LABEL}.
         </p>
+        <SelectedFileRows
+          label={shelf}
+          files={files}
+          disabled={busy}
+          onRemove={(index) => {
+            setFiles((current) => current.filter((_, fileIndex) => fileIndex !== index));
+            setError("");
+          }}
+        />
+        {busy && uploadStatus.total ? (
+          <div className="mt-4 rounded-lg border border-border bg-bg-secondary p-4" role="status">
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <span className="font-medium">Uploading and indexing</span>
+              <span className="text-text-muted">
+                {uploadStatus.current} of {uploadStatus.total}
+              </span>
+            </div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-border">
+              <div
+                className="h-full rounded-full bg-text-primary transition-[width] duration-300"
+                style={{
+                  width: `${Math.round((uploadStatus.current / uploadStatus.total) * 100)}%`,
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
         {error ? (
-          <p id="teacher-upload-error" role="alert" className="mt-3 text-sm text-destructive">
+          <p
+            id="teacher-upload-error"
+            role="alert"
+            className="mt-3 whitespace-pre-line text-sm text-destructive"
+          >
             {error}
           </p>
         ) : null}
@@ -10447,8 +10512,12 @@ function UploadDialog({
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button type="submit" disabled={busy} aria-busy={busy}>
-            {busy ? "Uploading and indexing…" : "Upload and index"}
+          <Button type="submit" disabled={busy || !files.length} aria-busy={busy}>
+            {busy
+              ? `Uploading ${uploadStatus.current} of ${uploadStatus.total}…`
+              : files.length
+                ? `Upload ${files.length} file${files.length === 1 ? "" : "s"} and index`
+                : "Upload files and index"}
           </Button>
         </div>
       </form>

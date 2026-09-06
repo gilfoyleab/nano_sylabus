@@ -5,7 +5,10 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getTeacherPracticeTopics } from "@/lib/teacher-app/client";
 import { ingestTeacherDocument } from "@/lib/teacher-document-ingest";
 import { randomUUID } from "node:crypto";
-import { extractedLearningTopics, readCommunityLearningTopics } from "@/lib/data/community-learning-topics";
+import {
+  extractedLearningTopics,
+  readCommunityLearningTopics,
+} from "@/lib/data/community-learning-topics";
 
 export type CommunityTopic = {
   id: string;
@@ -39,6 +42,8 @@ export type CommunitySubjectWorkspace = {
   canManage: boolean;
   folderPath: string;
   externalSubjectSlug: string | null;
+  publicationStatus: "draft" | "published";
+  publishedAt: string | null;
   topicSyncStatus: "pending" | "ready" | "empty" | "error";
   topicSyncError: string | null;
   contributionThreshold: number;
@@ -81,25 +86,34 @@ export async function getCommunitySubjectWorkspace(
 
   const subjectResult = await admin
     .from("community_subjects")
-    .select("id,name,teacher_id,folder_path,external_subject_slug,topic_sync_status,topic_sync_error")
+    .select(
+      "id,name,teacher_id,folder_path,external_subject_slug,publication_status,published_at,topic_sync_status,topic_sync_error",
+    )
     .eq("community_id", communityId)
     .eq("slug", subjectSlug)
     .eq("status", "active")
     .maybeSingle();
   if (subjectResult.error) throw subjectResult.error;
   if (!subjectResult.data) return null;
+  const canManage = String(communityResult.data.creator_id) === userId;
+  if (!canManage && subjectResult.data.publication_status !== "published") return null;
   const subjectId = String(subjectResult.data.id);
   const courseId = communityResult.data.study_course_id
     ? String(communityResult.data.study_course_id)
     : null;
 
   const [topicsResult, masteryResult, postsResult, votesResult] = await Promise.all([
-    readCommunityLearningTopics([{
-      id: subjectId,
-      name: String(subjectResult.data.name || subjectSlug),
-      teacherId: subjectResult.data.teacher_id || null,
-      externalSubjectSlug: subjectResult.data.external_subject_slug || null,
-    }], admin).then((data) => ({ data, error: null })),
+    readCommunityLearningTopics(
+      [
+        {
+          id: subjectId,
+          name: String(subjectResult.data.name || subjectSlug),
+          teacherId: subjectResult.data.teacher_id || null,
+          externalSubjectSlug: subjectResult.data.external_subject_slug || null,
+        },
+      ],
+      admin,
+    ).then((data) => ({ data, error: null })),
     courseId
       ? admin
           .from("student_topic_mastery")
@@ -127,11 +141,14 @@ export async function getCommunitySubjectWorkspace(
     subjectId,
     communityId,
     courseId,
-    canManage: String(communityResult.data.creator_id) === userId,
+    canManage,
     folderPath: String(subjectResult.data.folder_path || ""),
     externalSubjectSlug: subjectResult.data.external_subject_slug
       ? String(subjectResult.data.external_subject_slug)
       : null,
+    publicationStatus:
+      subjectResult.data.publication_status === "published" ? "published" : "draft",
+    publishedAt: subjectResult.data.published_at ? String(subjectResult.data.published_at) : null,
     topicSyncStatus:
       subjectResult.data.topic_sync_status === "ready" ||
       subjectResult.data.topic_sync_status === "empty" ||
@@ -183,10 +200,11 @@ export async function syncCommunitySubjectTopics(
   communitySlug: string,
   subjectId: string,
   admin: SupabaseClient = createSupabaseAdminClient(),
+  options: { publish?: boolean } = {},
 ) {
   const subjectResult = await admin
     .from("community_subjects")
-    .select("id,community_id,name,external_subject_slug,teacher_id")
+    .select("id,community_id,name,external_subject_slug,teacher_id,publication_status,published_at")
     .eq("id", subjectId)
     .eq("status", "active")
     .maybeSingle();
@@ -205,7 +223,10 @@ export async function syncCommunitySubjectTopics(
     throw new CommunityError("Only the community creator can refresh extracted topics.", 403);
   }
   if (!subjectResult.data.external_subject_slug || !communityResult.data.study_course_id) {
-    throw new CommunityError("This subject's community learning space is not ready. Reopen Create Subjects and try again.", 409);
+    throw new CommunityError(
+      "This subject's community learning space is not ready. Reopen Create Subjects and try again.",
+      409,
+    );
   }
   const teacherResult = await admin
     .from("teachers")
@@ -223,7 +244,10 @@ export async function syncCommunitySubjectTopics(
       { refresh: true },
     );
     if (!Array.isArray(payload.topics)) {
-      throw new CommunityError("The learning service did not return topics. Please try extraction again.", 502);
+      throw new CommunityError(
+        "The learning service did not return topics. Please try extraction again.",
+        502,
+      );
     }
     const topics = extractedLearningTopics(payload);
     if (topics.length) {
@@ -259,11 +283,20 @@ export async function syncCommunitySubjectTopics(
       if (existing.data?.length) {
         // Indexing may still be in progress. A transient empty response must
         // not erase the learning map students are already using.
-        throw new CommunityError("No new topics were found. Existing topics were kept. Wait for indexing to finish, then retry extraction.", 422);
+        throw new CommunityError(
+          "No new topics were found. Existing topics were kept. Wait for indexing to finish, then retry extraction.",
+          422,
+        );
       }
     }
+    if (options.publish && !topics.length) {
+      throw new CommunityError(
+        "No topics were found, so the subject was not published. Wait for indexing to finish, then try again.",
+        422,
+      );
+    }
     const syncedAt = new Date().toISOString();
-    const update = await admin
+    const topicUpdate = await admin
       .from("community_subjects")
       .update({
         topic_sync_status: topics.length ? "ready" : "empty",
@@ -271,9 +304,11 @@ export async function syncCommunitySubjectTopics(
         topic_sync_error: null,
       })
       .eq("id", subjectId);
-    if (update.error) throw update.error;
+    if (topicUpdate.error) throw topicUpdate.error;
 
-    if (topics.length && communityResult.data.study_course_id) {
+    const wasPublished = subjectResult.data.publication_status === "published";
+    const isPublished = options.publish || wasPublished;
+    if (topics.length && isPublished && communityResult.data.study_course_id) {
       const studyCourseId = String(communityResult.data.study_course_id);
       const externalSubjectSlug = String(subjectResult.data.external_subject_slug || "");
       const subjectName = String(subjectResult.data.name);
@@ -302,7 +337,30 @@ export async function syncCommunitySubjectTopics(
         ),
       );
     }
-    return { topics, topicSyncStatus: topics.length ? "ready" : "empty", syncedAt };
+
+    // Publishing is the final state transition. A draft must never become
+    // student-visible when extraction or challenge preparation only partially succeeds.
+    const publishedAt = options.publish
+      ? subjectResult.data.published_at
+        ? String(subjectResult.data.published_at)
+        : syncedAt
+      : subjectResult.data.published_at
+        ? String(subjectResult.data.published_at)
+        : null;
+    if (options.publish) {
+      const publicationUpdate = await admin
+        .from("community_subjects")
+        .update({ publication_status: "published", published_at: publishedAt })
+        .eq("id", subjectId);
+      if (publicationUpdate.error) throw publicationUpdate.error;
+    }
+    return {
+      topics,
+      topicSyncStatus: topics.length ? "ready" : "empty",
+      syncedAt,
+      publicationStatus: isPublished ? ("published" as const) : ("draft" as const),
+      publishedAt,
+    };
   } catch (error) {
     await admin
       .from("community_subjects")
@@ -318,6 +376,16 @@ export async function syncCommunitySubjectTopics(
   }
 }
 
+/** Extract the real indexed learning map, then expose the subject to members. */
+export async function publishCommunitySubject(
+  userId: string,
+  communitySlug: string,
+  subjectId: string,
+  admin: SupabaseClient = createSupabaseAdminClient(),
+) {
+  return syncCommunitySubjectTopics(userId, communitySlug, subjectId, admin, { publish: true });
+}
+
 /** Publish an owned subject's saved syllabus to its active community links. */
 export async function syncTeacherSyllabusToCommunities(
   userId: string,
@@ -325,20 +393,35 @@ export async function syncTeacherSyllabusToCommunities(
   subjectSlug: string,
   admin: SupabaseClient = createSupabaseAdminClient(),
 ) {
-  const links = await admin.from("community_subjects").select("id,community_id")
-    .eq("teacher_id", teacherId).eq("external_subject_slug", subjectSlug).eq("status", "active");
+  const links = await admin
+    .from("community_subjects")
+    .select("id,community_id")
+    .eq("teacher_id", teacherId)
+    .eq("external_subject_slug", subjectSlug)
+    .eq("status", "active");
   if (links.error) throw links.error;
   if (!links.data?.length) return { subjectsSynced: 0, topicCount: 0 };
-  const communities = await admin.from("communities").select("id,slug")
-    .in("id", links.data.map((link) => link.community_id))
-    .eq("creator_id", userId).eq("status", "active");
+  const communities = await admin
+    .from("communities")
+    .select("id,slug")
+    .in(
+      "id",
+      links.data.map((link) => link.community_id),
+    )
+    .eq("creator_id", userId)
+    .eq("status", "active");
   if (communities.error) throw communities.error;
   let subjectsSynced = 0;
   let topicCount = 0;
   for (const link of links.data) {
     const community = communities.data?.find((row) => row.id === link.community_id);
     if (!community) continue;
-    const result = await syncCommunitySubjectTopics(userId, String(community.slug), String(link.id), admin);
+    const result = await syncCommunitySubjectTopics(
+      userId,
+      String(community.slug),
+      String(link.id),
+      admin,
+    );
     subjectsSynced += 1;
     topicCount += result.topics.length;
   }
@@ -369,14 +452,14 @@ export async function createCommunityPost(input: {
   const admin = input.admin || createSupabaseAdminClient();
   const subjectResult = await admin
     .from("community_subjects")
-    .select("id,community_id")
+    .select("id,community_id,publication_status")
     .eq("id", input.subjectId)
     .maybeSingle();
   if (subjectResult.error) throw subjectResult.error;
   if (!subjectResult.data) throw new CommunityError("Subject not found.", 404);
   const communityResult = await admin
     .from("communities")
-    .select("id,slug")
+    .select("id,slug,creator_id")
     .eq("id", subjectResult.data.community_id)
     .eq("slug", input.communitySlug)
     .maybeSingle();
@@ -391,6 +474,12 @@ export async function createCommunityPost(input: {
   if (membership.error) throw membership.error;
   if (membership.data?.status !== "active") {
     throw new CommunityError("Join the community before posting.", 403);
+  }
+  if (
+    subjectResult.data.publication_status !== "published" &&
+    String(communityResult.data.creator_id) !== input.userId
+  ) {
+    throw new CommunityError("Subject not found.", 404);
   }
   const recent = await admin
     .from("community_posts")

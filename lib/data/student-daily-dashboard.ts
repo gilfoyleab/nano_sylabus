@@ -74,6 +74,13 @@ type DailyActivityRow = {
   score_percentage_sum: number | string;
 };
 
+type ScopedPracticeAttemptRow = {
+  created_at: string;
+  total_score: number | string;
+  total_marks: number | string;
+  passed: boolean | null;
+};
+
 function asNumber(value: number | string | null | undefined) {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -195,12 +202,37 @@ export function buildDailySemesters(data: CommunityHubData): DailySemester[] {
     });
 }
 
-function kathmanduDayBounds(now = new Date()) {
-  const today = communityDateKey(now);
-  return {
-    start: new Date(`${today}T00:00:00+05:45`).toISOString(),
-    end: new Date(`${shiftDateKey(today, 1)}T00:00:00+05:45`).toISOString(),
-  };
+export function aggregateScopedPracticeActivity(
+  attempts: ScopedPracticeAttemptRow[],
+): DailyActivityRow[] {
+  const activityByDate = new Map<string, DailyActivityRow>();
+
+  for (const attempt of attempts) {
+    const date = communityDateKey(new Date(attempt.created_at));
+    const totalScore = asNumber(attempt.total_score);
+    const totalMarks = asNumber(attempt.total_marks);
+    const current = activityByDate.get(date) ?? {
+      activity_date: date,
+      attempt_count: 0,
+      completed_count: 0,
+      graded_attempt_count: 0,
+      score_percentage_sum: 0,
+    };
+    current.attempt_count = asNumber(current.attempt_count) + 1;
+    current.completed_count =
+      asNumber(current.completed_count) + (attempt.passed === true ? 1 : 0);
+    if (totalMarks > 0) {
+      current.graded_attempt_count = asNumber(current.graded_attempt_count) + 1;
+      current.score_percentage_sum =
+        asNumber(current.score_percentage_sum) +
+        Math.max(0, Math.min(100, (totalScore / totalMarks) * 100));
+    }
+    activityByDate.set(date, current);
+  }
+
+  return [...activityByDate.values()].sort((left, right) =>
+    left.activity_date.localeCompare(right.activity_date),
+  );
 }
 
 export async function getStudentDailyDashboard(
@@ -209,36 +241,35 @@ export async function getStudentDailyDashboard(
 ): Promise<StudentDailyDashboard> {
   const today = communityDateKey(new Date());
   const activityStart = calendarStart(today);
-  const bounds = kathmanduDayBounds();
+  const activityStartTimestamp = new Date(`${activityStart}T00:00:00+05:45`).toISOString();
+  const activityEndTimestamp = new Date(
+    `${shiftDateKey(today, 1)}T00:00:00+05:45`,
+  ).toISOString();
+  const challenge = await getStudentChallengeDashboard(userId);
 
-  const [challenge, community, activityResult, todayCompletionsResult] = await Promise.all([
-    getStudentChallengeDashboard(userId),
+  const [community, activityResult] = await Promise.all([
     getCommunityHubForUser(userId, admin),
-    admin
-      .from("student_daily_practice_activity")
-      .select(
-        "activity_date,attempt_count,completed_count,graded_attempt_count,score_percentage_sum",
-      )
-      .eq("user_id", userId)
-      .gte("activity_date", activityStart)
-      .lte("activity_date", today)
-      .order("activity_date", { ascending: true }),
-    admin
-      .from("student_challenges")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .eq("status", "completed")
-      .gte("completed_at", bounds.start)
-      .lt("completed_at", bounds.end),
+    challenge.community?.courseId
+      ? admin
+          .from("student_practice_attempts")
+          .select("created_at,total_score,total_marks,passed")
+          .eq("user_id", userId)
+          .eq("course_id", challenge.community.courseId)
+          .gte("created_at", activityStartTimestamp)
+          .lt("created_at", activityEndTimestamp)
+          .order("created_at", { ascending: true })
+      : Promise.resolve({ data: [], error: null }),
   ]);
 
   if (activityResult.error) throw activityResult.error;
-  if (todayCompletionsResult.error) throw todayCompletionsResult.error;
+  const scopedActivity = aggregateScopedPracticeActivity(
+    (activityResult.data ?? []) as ScopedPracticeAttemptRow[],
+  );
 
   return {
     challenge,
-    todayChallengeCompletions: todayCompletionsResult.count ?? 0,
-    activity: buildDailyActivityCalendar((activityResult.data ?? []) as DailyActivityRow[]),
+    todayChallengeCompletions: challenge.todayCompletedCount,
+    activity: buildDailyActivityCalendar(scopedActivity),
     community: community
       ? {
           name: community.community.name,

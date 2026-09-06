@@ -353,7 +353,14 @@ export function CommunityStudySpaceClient({
                         <span className="block text-sm font-medium">{titleCase(subject.name)}</span>
                         <span className="mt-0.5 block text-xs text-text-muted">
                           {canManage
-                            ? [subject.code, "Community members"].filter(Boolean).join(" · ")
+                            ? [
+                                subject.code,
+                                subject.publicationStatus === "published"
+                                  ? "Published · Community members"
+                                  : "Draft · Only you",
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")
                             : subject.code || "Subject workspace"}
                         </span>
                       </div>

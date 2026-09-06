@@ -24,6 +24,48 @@ export class StudentCourseError extends Error {
   }
 }
 
+export type StudentCommunityLearningScope = {
+  communityId: string;
+  communitySlug: string;
+  communityName: string;
+  courseId: string | null;
+};
+
+/** Returns only the learner community; creator memberships never become student scope. */
+export async function getStudentCommunityLearningScope(
+  studentId: string,
+  admin: SupabaseClient = createSupabaseAdminClient(),
+): Promise<StudentCommunityLearningScope | null> {
+  const membershipResult = await admin
+    .from("community_memberships")
+    .select("community_id")
+    .eq("user_id", studentId)
+    .eq("role", "member")
+    .eq("status", "active")
+    .maybeSingle();
+  if (membershipResult.error) throw membershipResult.error;
+  const communityId = String(membershipResult.data?.community_id || "");
+  if (!communityId) return null;
+
+  const communityResult = await admin
+    .from("communities")
+    .select("id,slug,name,study_course_id")
+    .eq("id", communityId)
+    .eq("status", "active")
+    .maybeSingle();
+  if (communityResult.error) throw communityResult.error;
+  if (!communityResult.data) return null;
+
+  return {
+    communityId,
+    communitySlug: String(communityResult.data.slug || ""),
+    communityName: String(communityResult.data.name || "Community"),
+    courseId: communityResult.data.study_course_id
+      ? String(communityResult.data.study_course_id)
+      : null,
+  };
+}
+
 type TeacherDocumentFileRow = {
   teacher_id: string | null;
   collection_path: string | null;
@@ -531,6 +573,7 @@ async function getCommunitySubjectAccessForCourse(
     .eq("community_id", communityId)
     .eq("external_subject_slug", subjectSlug)
     .eq("status", "active")
+    .eq("publication_status", "published")
     .maybeSingle();
   if (subjectResult.error) throw subjectResult.error;
   if (!subjectResult.data?.teacher_id || !subjectResult.data.external_subject_slug) return null;
@@ -554,14 +597,13 @@ export async function listStudentCommunitySubjectAccess(
     .from("community_memberships")
     .select("community_id")
     .eq("user_id", studentId)
+    .eq("role", "member")
     .eq("status", "active");
   if (membershipResult.error) throw membershipResult.error;
 
   const communityIds = [
     ...new Set(
-      (membershipResult.data || [])
-        .map((row) => String(row.community_id || ""))
-        .filter(Boolean),
+      (membershipResult.data || []).map((row) => String(row.community_id || "")).filter(Boolean),
     ),
   ];
   if (!communityIds.length) return [];
@@ -591,15 +633,12 @@ export async function listStudentCommunitySubjectAccess(
     .from("community_subjects")
     .select("community_id,term_id,teacher_id,external_subject_slug,name,folder_path")
     .in("community_id", readyCommunityIds)
-    .eq("status", "active");
+    .eq("status", "active")
+    .eq("publication_status", "published");
   if (subjectResult.error) throw subjectResult.error;
 
   const termIds = [
-    ...new Set(
-      (subjectResult.data || [])
-        .map((row) => String(row.term_id || ""))
-        .filter(Boolean),
-    ),
+    ...new Set((subjectResult.data || []).map((row) => String(row.term_id || "")).filter(Boolean)),
   ];
   const termsResult = termIds.length
     ? await admin
@@ -608,9 +647,7 @@ export async function listStudentCommunitySubjectAccess(
         .in("id", termIds)
     : { data: [], error: null };
   if (termsResult.error) throw termsResult.error;
-  const termById = new Map(
-    (termsResult.data || []).map((row) => [String(row.id || ""), row]),
-  );
+  const termById = new Map((termsResult.data || []).map((row) => [String(row.id || ""), row]));
 
   return (subjectResult.data || []).flatMap((row) => {
     const courseId = courseByCommunity.get(String(row.community_id || ""));
@@ -620,27 +657,29 @@ export async function listStudentCommunitySubjectAccess(
     const termId = String(row.term_id || "");
     const term = termById.get(termId);
     if (!courseId || !teacherId || !slug) return [];
-    return [{
-      courseId,
-      teacherId,
-      subjectSlug: slug,
-      subjectName: String(row.name || slug),
-      folderPath: String(row.folder_path || row.name || slug),
-      accessKind: "community",
-      community: {
-        id: communityId,
-        name: communityNameById.get(communityId) || "Community",
-      },
-      term: term
-        ? {
-            id: termId,
-            yearNumber: Number(term.year_number) || 1,
-            semesterNumber: Number(term.semester_number) || 1,
-            semesterInYear: Number(term.semester_in_year) || 1,
-            position: Number(term.position) || 0,
-          }
-        : undefined,
-    } satisfies StudentCourseSubjectAccess];
+    return [
+      {
+        courseId,
+        teacherId,
+        subjectSlug: slug,
+        subjectName: String(row.name || slug),
+        folderPath: String(row.folder_path || row.name || slug),
+        accessKind: "community",
+        community: {
+          id: communityId,
+          name: communityNameById.get(communityId) || "Community",
+        },
+        term: term
+          ? {
+              id: termId,
+              yearNumber: Number(term.year_number) || 1,
+              semesterNumber: Number(term.semester_number) || 1,
+              semesterInYear: Number(term.semester_in_year) || 1,
+              position: Number(term.position) || 0,
+            }
+          : undefined,
+      } satisfies StudentCourseSubjectAccess,
+    ];
   });
 }
 
@@ -749,12 +788,7 @@ export async function getStudentCourseSubjectAccessForCourse(
     .maybeSingle();
   if (subjectResult.error) throw subjectResult.error;
   if (!subjectResult.data) {
-    return getCommunitySubjectAccessForCourse(
-      studentId,
-      courseId,
-      subjectSlug,
-      admin,
-    );
+    return getCommunitySubjectAccessForCourse(studentId, courseId, subjectSlug, admin);
   }
 
   return {

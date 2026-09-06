@@ -88,6 +88,42 @@ describe("community leave controls (without browser)", () => {
     );
     expect(html).toContain('aria-label="Leave Henglish community"');
   });
+  it("lets a creator open the same joined community as a student or as its admin", () => {
+    const html = renderToStaticMarkup(
+      createElement(CommunityCatalogClient, {
+        initialCommunities: [
+          {
+            ...community,
+            membership: { role: "creator", status: "active", joinedAt: "2026-09-03" },
+            canManage: true,
+          },
+        ],
+        signedIn: true,
+      }),
+    );
+    expect(html).toContain('href="/app/communities/henglish"');
+    expect(html).toContain("Preview as student");
+    expect(html).toContain('href="/teachers?view=communities&amp;community=henglish"');
+    expect(html).toContain("Admin workspace");
+    expect(html).toContain("do not use that join slot");
+    expect(html).not.toContain("Leave Henglish community");
+  });
+  it("labels an owned community learner route as a student preview", () => {
+    const html = renderToStaticMarkup(
+      createElement(CommunitySubjectExplorer, {
+        community: {
+          ...community,
+          membership: { role: "creator", status: "active", joinedAt: "2026-09-03" },
+          canManage: true,
+        },
+        insights: {},
+      }),
+    );
+    expect(html).toContain("Student preview");
+    expect(html).toContain("is not your joined learner community");
+    expect(html).toContain('href="/teachers?view=communities&amp;community=henglish"');
+    expect(html).toContain("Back to Admin Workspace");
+  });
   it("shows leave near the top of Community Hub instead of only beneath the feed", () => {
     const data: CommunityHubData = {
       community,

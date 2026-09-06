@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   attempts: vi.fn(),
   courses: vi.fn(),
   communities: vi.fn(),
+  communityScope: vi.fn(),
   private: vi.fn(),
   ensure: vi.fn(),
   history: vi.fn(),
@@ -18,9 +19,8 @@ vi.mock("@/lib/data/student-mastery", () => ({
   listPracticeAttempts: mocks.attempts,
 }));
 vi.mock("@/lib/student-courses", () => ({
-  listStudentCourseSubjects: mocks.courses,
   listStudentCommunitySubjectAccess: mocks.communities,
-  listCreatorPrivateSubjectAccess: mocks.private,
+  getStudentCommunityLearningScope: mocks.communityScope,
 }));
 vi.mock("@/lib/data/student-challenges", () => ({
   ensureDailyChallenges: mocks.ensure,
@@ -53,6 +53,12 @@ describe("student challenge dashboard uses the community learning map", () => {
         accessKind: "community",
       },
     ]);
+    mocks.communityScope.mockResolvedValue({
+      communityId: "community-1",
+      communitySlug: "henglish",
+      communityName: "Henglish",
+      courseId: "course-1",
+    });
     mocks.ensure.mockResolvedValue([]);
     mocks.history.mockResolvedValue({ challenges: [], page: 1, total: 0, totalPages: 0 });
     mocks.topics.mockResolvedValue({
@@ -110,6 +116,85 @@ describe("student challenge dashboard uses the community learning map", () => {
     expect(result.totalTopics).toBe(0);
     expect(mocks.ensure).toHaveBeenCalledWith("member", [], expect.anything());
     expect(mocks.topics).not.toHaveBeenCalled();
+  });
+
+  it("scopes completed history to the currently joined community course", async () => {
+    await getStudentChallengeDashboard("member");
+
+    expect(mocks.history).toHaveBeenCalledWith("member", 1, undefined, {
+      courseId: "course-1",
+      subjectSlug: undefined,
+    });
+  });
+
+  it("recomputes progress and scores from the newly joined community only", async () => {
+    const now = new Date().toISOString();
+    db.tables.student_challenges = [
+      {
+        user_id: "member",
+        course_id: "course-1",
+        status: "completed",
+        completed_at: now,
+      },
+      {
+        user_id: "member",
+        course_id: "old-community-course",
+        status: "completed",
+        completed_at: now,
+      },
+    ];
+    mocks.attempts.mockResolvedValue([
+      {
+        courseId: "course-1",
+        subjectSlug: "teacher_nims",
+        subjectName: "Nims",
+        source: "challenge",
+        totalScore: 5,
+        totalMarks: 10,
+        passed: true,
+        createdAt: now,
+      },
+      {
+        courseId: "old-community-course",
+        subjectSlug: "old-subject",
+        subjectName: "Old subject",
+        source: "challenge",
+        totalScore: 10,
+        totalMarks: 10,
+        passed: true,
+        createdAt: now,
+      },
+    ]);
+
+    const result = await getStudentChallengeDashboard("member");
+
+    expect(result.community?.name).toBe("Henglish");
+    expect(result.passedThisWeek).toBe(1);
+    expect(result.averageTestScore).toBe(50);
+    expect(result.passRateLast30Days).toBe(100);
+    expect(mocks.ensure).toHaveBeenCalledWith("member", expect.any(Array), {
+      minimumRecommendationCount: 3,
+    });
+  });
+
+  it("does not surface old community history when no learner community is active", async () => {
+    mocks.communityScope.mockResolvedValue(null);
+    mocks.communities.mockResolvedValue([]);
+    mocks.history.mockResolvedValue({
+      challenges: [{ id: "old-community-challenge" }],
+      page: 1,
+      total: 1,
+      totalPages: 1,
+    });
+
+    const result = await getStudentChallengeDashboard("member");
+
+    expect(result.community).toBeNull();
+    expect(result.completedChallenges).toEqual([]);
+    expect(result.completedChallengeTotal).toBe(0);
+    expect(result.passedThisWeek).toBe(0);
+    expect(result.averageTestScore).toBeNull();
+    expect(mocks.history).not.toHaveBeenCalled();
   });
 
   it("retains the existing provider flow for non-community courses", async () => {

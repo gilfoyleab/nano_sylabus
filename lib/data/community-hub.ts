@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { CommunityDetail, CommunityTerm } from "@/lib/communities";
+import { selectStudentCommunity } from "@/lib/communities";
 import { CommunityError, getCommunity, listJoinedCommunities } from "@/lib/data/communities";
 import { getCommunitySubjectExplorerInsights } from "@/lib/data/community-subject-explorer";
 import { readCommunityLearningTopics } from "@/lib/data/community-learning-topics";
@@ -218,20 +219,12 @@ function documentShelf(pathValue: string | null) {
   return "other";
 }
 
-function selectedJoinedCommunity(communities: Awaited<ReturnType<typeof listJoinedCommunities>>) {
-  return (
-    communities.find((community) => community.membership?.role === "member") ||
-    communities.find((community) => community.membership?.status === "active") ||
-    null
-  );
-}
-
 /** Builds one honest, community-scoped snapshot for the student hub. */
 export async function getCommunityHubForUser(
   userId: string,
   admin: SupabaseClient = createSupabaseAdminClient(),
 ): Promise<CommunityHubData | null> {
-  const joined = selectedJoinedCommunity(await listJoinedCommunities(userId, admin));
+  const joined = selectStudentCommunity(await listJoinedCommunities(userId, admin));
   if (!joined) return null;
   const community = await getCommunity(joined.slug, userId, admin);
   if (!community || community.membership?.status !== "active" || !community.terms.length)
@@ -274,8 +267,10 @@ export async function getCommunityHubForUser(
     memberIds.length
       ? admin.from("student_profiles").select("user_id,full_name").in("user_id", memberIds)
       : Promise.resolve({ data: [], error: null }),
-    readCommunityLearningTopics(community.terms.flatMap((term) => term.subjects), admin)
-      .then((data) => ({ data, error: null })),
+    readCommunityLearningTopics(
+      community.terms.flatMap((term) => term.subjects),
+      admin,
+    ).then((data) => ({ data, error: null })),
     teacherIds.length
       ? admin
           .from("teacher_document_files")

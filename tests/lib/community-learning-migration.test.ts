@@ -27,6 +27,10 @@ const ownerDeletion = path.join(
   process.cwd(),
   "supabase/migrations/20260903100000_community_owner_deletion.sql",
 );
+const subjectPublication = path.join(
+  process.cwd(),
+  "supabase/migrations/20260906153000_community_subject_publication.sql",
+);
 
 describe("community learning migration", () => {
   let db: PGlite;
@@ -94,7 +98,13 @@ describe("community learning migration", () => {
     await db.exec(await readFile(singleActiveCommunity, "utf8"));
     await db.exec(await readFile(communityHub, "utf8"));
     await db.exec(await readFile(ownerDeletion, "utf8"));
-    await db.exec(await readFile(path.join(process.cwd(), "supabase/migrations/20260903153000_community_leave_access.sql"), "utf8"));
+    await db.exec(
+      await readFile(
+        path.join(process.cwd(), "supabase/migrations/20260903153000_community_leave_access.sql"),
+        "utf8",
+      ),
+    );
+    await db.exec(await readFile(subjectPublication, "utf8"));
     await db.exec(`
       insert into auth.users(id) values
         ('11111111-1111-4111-8111-111111111111'),
@@ -143,30 +153,106 @@ describe("community learning migration", () => {
     `);
   }
 
-  it.each(["active", "completed"])("leaving cancels %s access without deleting progress or the community", async (enrollmentStatus) => {
-    await seedDeletion();
-    await db.query("update teacher_course_enrollments set status = $1", [enrollmentStatus]);
-    await db.exec(`insert into student_topic_mastery(user_id,course_id,subject_slug,topic_key,percentage)
-      select '${member}', id, 'source-math', 'algebra', 80 from teacher_courses;`);
-    await db.query("select leave_community($1, (select id from communities where slug='owned'))", [member]);
-    expect((await db.query("select status, current_term_id, left_at is not null as has_left_at from community_memberships where user_id=$1", [member])).rows)
-      .toEqual([{ status: "left", current_term_id: null, has_left_at: true }]);
-    expect((await db.query("select status from teacher_course_enrollments")).rows).toEqual([{ status: "cancelled" }]);
-    expect((await db.query("select status from student_challenges")).rows).toEqual([{ status: "completed" }]);
-    expect((await db.query("select percentage from student_topic_mastery")).rows).toEqual([{ percentage: "80" }]);
-    expect((await db.query("select status from communities where slug='owned'")).rows).toEqual([{ status: "active" }]);
-    expect((await db.query("select status from community_memberships where user_id=$1", [owner])).rows)
-      .toEqual([{ status: "active" }, { status: "active" }]);
-    // Leaving does not consume an invite or delete material; a public rejoin still works.
-    await db.query("select join_community($1, 'owned')", [member]);
-    expect((await db.query("select status from community_memberships where user_id=$1", [member])).rows).toEqual([{ status: "active" }]);
+  it("lets a creator own many communities and join exactly one community owned by someone else", async () => {
+    for (const [creatorId, slug] of [
+      [owner, "owner-one"],
+      [owner, "owner-two"],
+      [member, "external-one"],
+      [member, "external-two"],
+    ] as const) {
+      await db.query("select public.create_community_with_terms($1,$2,$3,$4,$5,$6,$7,$8,$9)", [
+        creatorId,
+        slug,
+        slug,
+        "TU",
+        "CS",
+        "",
+        1,
+        2,
+        "public",
+      ]);
+    }
+
+    // Rejoining an owned community is idempotent and must preserve creator access.
+    await db.query("select public.join_community($1,$2)", [owner, "owner-one"]);
+    await db.query("select public.join_community($1,$2)", [owner, "external-one"]);
+
+    const active = await db.query<{ role: string; count: number }>(
+      `select role, count(*)::integer as count
+       from public.community_memberships
+       where user_id = $1 and status = 'active'
+       group by role
+       order by role`,
+      [owner],
+    );
+    expect(active.rows).toEqual([
+      { role: "creator", count: 2 },
+      { role: "member", count: 1 },
+    ]);
+
+    await expect(
+      db.query("select public.join_community($1,$2)", [owner, "external-two"]),
+    ).rejects.toThrow("only one active community");
   });
+
+  it.each(["active", "completed"])(
+    "leaving cancels %s access without deleting progress or the community",
+    async (enrollmentStatus) => {
+      await seedDeletion();
+      await db.query("update teacher_course_enrollments set status = $1", [enrollmentStatus]);
+      await db.exec(`insert into student_topic_mastery(user_id,course_id,subject_slug,topic_key,percentage)
+      select '${member}', id, 'source-math', 'algebra', 80 from teacher_courses;`);
+      await db.query(
+        "select leave_community($1, (select id from communities where slug='owned'))",
+        [member],
+      );
+      expect(
+        (
+          await db.query(
+            "select status, current_term_id, left_at is not null as has_left_at from community_memberships where user_id=$1",
+            [member],
+          )
+        ).rows,
+      ).toEqual([{ status: "left", current_term_id: null, has_left_at: true }]);
+      expect((await db.query("select status from teacher_course_enrollments")).rows).toEqual([
+        { status: "cancelled" },
+      ]);
+      expect((await db.query("select status from student_challenges")).rows).toEqual([
+        { status: "completed" },
+      ]);
+      expect((await db.query("select percentage from student_topic_mastery")).rows).toEqual([
+        { percentage: "80" },
+      ]);
+      expect((await db.query("select status from communities where slug='owned'")).rows).toEqual([
+        { status: "active" },
+      ]);
+      expect(
+        (await db.query("select status from community_memberships where user_id=$1", [owner])).rows,
+      ).toEqual([{ status: "active" }, { status: "active" }]);
+      // Leaving does not consume an invite or delete material; a public rejoin still works.
+      await db.query("select join_community($1, 'owned')", [member]);
+      expect(
+        (await db.query("select status from community_memberships where user_id=$1", [member]))
+          .rows,
+      ).toEqual([{ status: "active" }]);
+    },
+  );
 
   it("rejects creator and non-member leave without changing community access", async () => {
     await seedDeletion();
-    await expect(db.query("select leave_community($1, (select id from communities where slug='owned'))", [owner])).rejects.toThrow("creators cannot leave");
-    await expect(db.query("select leave_community($1, (select id from communities where slug='other'))", [member])).rejects.toThrow("Active community membership not found");
-    expect((await db.query("select status from teacher_course_enrollments")).rows).toEqual([{ status: "active" }]);
+    await expect(
+      db.query("select leave_community($1, (select id from communities where slug='owned'))", [
+        owner,
+      ]),
+    ).rejects.toThrow("creators cannot leave");
+    await expect(
+      db.query("select leave_community($1, (select id from communities where slug='other'))", [
+        member,
+      ]),
+    ).rejects.toThrow("Active community membership not found");
+    expect((await db.query("select status from teacher_course_enrollments")).rows).toEqual([
+      { status: "active" },
+    ]);
   });
 
   it("rolls back leave if enrollment revocation fails", async () => {
@@ -177,10 +263,14 @@ describe("community learning migration", () => {
       create trigger reject_cancellation before update on teacher_course_enrollments
       for each row execute function reject_cancellation();
     `);
-    await expect(db.query("select leave_community($1, (select id from communities where slug='owned'))", [member]))
-      .rejects.toThrow("Enrollment unavailable");
-    expect((await db.query("select status from community_memberships where user_id=$1", [member])).rows)
-      .toEqual([{ status: "active" }]);
+    await expect(
+      db.query("select leave_community($1, (select id from communities where slug='owned'))", [
+        member,
+      ]),
+    ).rejects.toThrow("Enrollment unavailable");
+    expect(
+      (await db.query("select status from community_memberships where user_id=$1", [member])).rows,
+    ).toEqual([{ status: "active" }]);
   });
 
   it("lets only the owner delete, with exact confirmation and no partial changes", async () => {

@@ -175,66 +175,71 @@ async function teacherRequest<T>(
   const { baseUrl, rejectUnauthorized, timeoutMs } = getTenantApiEnv();
   const requestTimeoutMs = options.timeoutMs ?? timeoutMs;
 
-  return trackApiRequest("collection", () => new Promise<T>((resolve, reject) => {
-    const url = new URL(path, baseUrl);
-    const transport = url.protocol === "https:" ? https : http;
-    const serializedBody = options.body === undefined ? undefined : JSON.stringify(options.body);
-    const request = transport.request(
-      url,
-      {
-        method: options.method ?? "GET",
-        rejectUnauthorized,
-        headers: {
-          Authorization: `Bearer ${collectionSk}`,
-          Accept: "application/json",
-          ...(serializedBody
-            ? {
-                "Content-Type": "application/json",
-                "Content-Length": Buffer.byteLength(serializedBody),
+  return trackApiRequest(
+    "collection",
+    () =>
+      new Promise<T>((resolve, reject) => {
+        const url = new URL(path, baseUrl);
+        const transport = url.protocol === "https:" ? https : http;
+        const serializedBody =
+          options.body === undefined ? undefined : JSON.stringify(options.body);
+        const request = transport.request(
+          url,
+          {
+            method: options.method ?? "GET",
+            rejectUnauthorized,
+            headers: {
+              Authorization: `Bearer ${collectionSk}`,
+              Accept: "application/json",
+              ...(serializedBody
+                ? {
+                    "Content-Type": "application/json",
+                    "Content-Length": Buffer.byteLength(serializedBody),
+                  }
+                : {}),
+            },
+          },
+          (response) => {
+            let raw = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => {
+              raw += chunk;
+            });
+            response.on("end", () => {
+              let payload: unknown = {};
+              if (raw.trim()) {
+                try {
+                  payload = JSON.parse(raw);
+                } catch {
+                  reject(
+                    new TeacherApiError(
+                      `Teacher API returned invalid JSON: ${raw.slice(0, 300)}`,
+                      response.statusCode ?? 502,
+                    ),
+                  );
+                  return;
+                }
               }
-            : {}),
-        },
-      },
-      (response) => {
-        let raw = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => {
-          raw += chunk;
-        });
-        response.on("end", () => {
-          let payload: unknown = {};
-          if (raw.trim()) {
-            try {
-              payload = JSON.parse(raw);
-            } catch {
-              reject(
-                new TeacherApiError(
-                  `Teacher API returned invalid JSON: ${raw.slice(0, 300)}`,
-                  response.statusCode ?? 502,
-                ),
-              );
-              return;
-            }
-          }
 
-          const status = response.statusCode ?? 502;
-          if (status >= 400) {
-            const detail = formatTeacherApiError(payload, status);
-            reject(new TeacherApiError(detail, status, payload));
-            return;
-          }
-          resolve(payload as T);
-        });
-      },
-    );
+              const status = response.statusCode ?? 502;
+              if (status >= 400) {
+                const detail = formatTeacherApiError(payload, status);
+                reject(new TeacherApiError(detail, status, payload));
+                return;
+              }
+              resolve(payload as T);
+            });
+          },
+        );
 
-    request.setTimeout(requestTimeoutMs, () => {
-      request.destroy(new Error(`Teacher API timed out after ${requestTimeoutMs}ms`));
-    });
-    request.on("error", reject);
-    if (serializedBody) request.write(serializedBody);
-    request.end();
-  }));
+        request.setTimeout(requestTimeoutMs, () => {
+          request.destroy(new Error(`Teacher API timed out after ${requestTimeoutMs}ms`));
+        });
+        request.on("error", reject);
+        if (serializedBody) request.write(serializedBody);
+        request.end();
+      }),
+  );
 }
 
 function parseTeacherSseEvent(rawEvent: string): TeacherSubjectStreamEvent | null {
@@ -330,91 +335,95 @@ async function teacherStreamRequest(
   const { baseUrl, rejectUnauthorized, timeoutMs: defaultTimeoutMs } = getTenantApiEnv();
   const requestTimeoutMs = timeoutMs ?? defaultTimeoutMs;
 
-  await trackApiRequest("collection", () => new Promise<void>((resolve, reject) => {
-    let settled = false;
-    let buffer = "";
-    const url = new URL(path, baseUrl);
-    const transport = url.protocol === "https:" ? https : http;
-    const serializedBody = JSON.stringify(body);
-    const request = transport.request(
-      url,
-      {
-        method: "POST",
-        rejectUnauthorized,
-        headers: {
-          Authorization: `Bearer ${collectionSk}`,
-          Accept: "text/event-stream",
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(serializedBody),
-        },
-      },
-      (response) => {
-        response.setEncoding("utf8");
-        if ((response.statusCode ?? 500) >= 400) {
-          let raw = "";
-          response.on("data", (chunk: string) => {
-            raw += chunk;
-          });
-          response.on("end", () => {
-            if (settled) return;
-            settled = true;
-            let payload: unknown = raw;
-            try {
-              payload = raw.trim() ? JSON.parse(raw) : {};
-            } catch {}
-            reject(
-              new TeacherApiError(
-                formatTeacherApiError(payload, response.statusCode ?? 502),
-                response.statusCode ?? 502,
-                payload,
-              ),
-            );
-          });
-          return;
-        }
-
-        response.on("data", async (chunk: string) => {
-          buffer += chunk;
-          const parts = buffer.split(/\r?\n\r?\n/);
-          buffer = parts.pop() ?? "";
-          for (const part of parts) {
-            const event = parseTeacherSseEvent(part);
-            if (!event) continue;
-            try {
-              await onEvent(event);
-            } catch (error) {
-              request.destroy(error instanceof Error ? error : new Error(String(error)));
+  await trackApiRequest(
+    "collection",
+    () =>
+      new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let buffer = "";
+        const url = new URL(path, baseUrl);
+        const transport = url.protocol === "https:" ? https : http;
+        const serializedBody = JSON.stringify(body);
+        const request = transport.request(
+          url,
+          {
+            method: "POST",
+            rejectUnauthorized,
+            headers: {
+              Authorization: `Bearer ${collectionSk}`,
+              Accept: "text/event-stream",
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(serializedBody),
+            },
+          },
+          (response) => {
+            response.setEncoding("utf8");
+            if ((response.statusCode ?? 500) >= 400) {
+              let raw = "";
+              response.on("data", (chunk: string) => {
+                raw += chunk;
+              });
+              response.on("end", () => {
+                if (settled) return;
+                settled = true;
+                let payload: unknown = raw;
+                try {
+                  payload = raw.trim() ? JSON.parse(raw) : {};
+                } catch {}
+                reject(
+                  new TeacherApiError(
+                    formatTeacherApiError(payload, response.statusCode ?? 502),
+                    response.statusCode ?? 502,
+                    payload,
+                  ),
+                );
+              });
               return;
             }
-          }
-        });
 
-        response.on("end", () => {
+            response.on("data", async (chunk: string) => {
+              buffer += chunk;
+              const parts = buffer.split(/\r?\n\r?\n/);
+              buffer = parts.pop() ?? "";
+              for (const part of parts) {
+                const event = parseTeacherSseEvent(part);
+                if (!event) continue;
+                try {
+                  await onEvent(event);
+                } catch (error) {
+                  request.destroy(error instanceof Error ? error : new Error(String(error)));
+                  return;
+                }
+              }
+            });
+
+            response.on("end", () => {
+              if (settled) return;
+              settled = true;
+              if (buffer.trim()) {
+                const event = parseTeacherSseEvent(buffer);
+                if (event) {
+                  Promise.resolve(onEvent(event)).then(() => resolve(), reject);
+                  return;
+                }
+              }
+              resolve();
+            });
+          },
+        );
+
+        request.setTimeout(requestTimeoutMs, () => {
+          request.destroy(new Error(`Teacher API timed out after ${requestTimeoutMs}ms`));
+        });
+        request.on("error", (error) => {
           if (settled) return;
           settled = true;
-          if (buffer.trim()) {
-            const event = parseTeacherSseEvent(buffer);
-            if (event) {
-              Promise.resolve(onEvent(event)).then(() => resolve(), reject);
-              return;
-            }
-          }
-          resolve();
+          reject(error);
         });
-      },
-    );
-
-    request.setTimeout(requestTimeoutMs, () => {
-      request.destroy(new Error(`Teacher API timed out after ${requestTimeoutMs}ms`));
-    });
-    request.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-    request.write(serializedBody);
-    request.end();
-  }));
+        request.write(serializedBody);
+        request.end();
+      }),
+  );
 }
 
 export const getTeacherMe = (key: string) => teacherRequest<ApiRecord>("/v1/collection/me", key);
@@ -435,38 +444,45 @@ export function fetchTeacherDocumentRaw(key: string, documentId: string) {
   const { baseUrl, rejectUnauthorized, timeoutMs } = getTenantApiEnv();
 
   const readRaw = (path: string) =>
-    trackApiRequest("collection", () => new Promise<{ body: Buffer; contentType: string }>((resolve, reject) => {
-      const url = new URL(path, baseUrl);
-      const transport = url.protocol === "https:" ? https : http;
-      const request = transport.request(
-        url,
-        { method: "GET", rejectUnauthorized, headers: { Authorization: `Bearer ${key}` } },
-        (response) => {
-          const chunks: Buffer[] = [];
-          response.on("data", (chunk: Buffer) => chunks.push(chunk));
-          response.on("error", reject);
-          response.on("end", () => {
-            const status = response.statusCode ?? 502;
-            if (status >= 400) {
-              reject(
-                new TeacherApiError(`Teacher API ${url.pathname} failed with ${status}`, status),
-              );
-              return;
-            }
-            resolve({
-              body: Buffer.concat(chunks),
-              contentType:
-                String(response.headers["content-type"] || "") || "application/octet-stream",
-            });
+    trackApiRequest(
+      "collection",
+      () =>
+        new Promise<{ body: Buffer; contentType: string }>((resolve, reject) => {
+          const url = new URL(path, baseUrl);
+          const transport = url.protocol === "https:" ? https : http;
+          const request = transport.request(
+            url,
+            { method: "GET", rejectUnauthorized, headers: { Authorization: `Bearer ${key}` } },
+            (response) => {
+              const chunks: Buffer[] = [];
+              response.on("data", (chunk: Buffer) => chunks.push(chunk));
+              response.on("error", reject);
+              response.on("end", () => {
+                const status = response.statusCode ?? 502;
+                if (status >= 400) {
+                  reject(
+                    new TeacherApiError(
+                      `Teacher API ${url.pathname} failed with ${status}`,
+                      status,
+                    ),
+                  );
+                  return;
+                }
+                resolve({
+                  body: Buffer.concat(chunks),
+                  contentType:
+                    String(response.headers["content-type"] || "") || "application/octet-stream",
+                });
+              });
+            },
+          );
+          request.setTimeout(timeoutMs, () => {
+            request.destroy(new Error(`Teacher API timed out after ${timeoutMs}ms`));
           });
-        },
-      );
-      request.setTimeout(timeoutMs, () => {
-        request.destroy(new Error(`Teacher API timed out after ${timeoutMs}ms`));
-      });
-      request.on("error", reject);
-      request.end();
-    }));
+          request.on("error", reject);
+          request.end();
+        }),
+    );
 
   const encodedId = encodeURIComponent(documentId);
   return readRaw(`/api/v1/documents/${encodedId}/raw`).catch((error) => {
@@ -727,46 +743,62 @@ export async function submitTeacherChallengeExamFile(
   const boundary = `----padhai-challenge-scan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const safeName = input.file.name.replace(/["\r\n]/g, "_");
   const body = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="student_name"\r\n\r\n${input.studentName?.trim() || "Student"}\r\n`),
-    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeName}"\r\nContent-Type: ${input.file.mimeType || "application/octet-stream"}\r\n\r\n`),
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="student_name"\r\n\r\n${input.studentName?.trim() || "Student"}\r\n`,
+    ),
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeName}"\r\nContent-Type: ${input.file.mimeType || "application/octet-stream"}\r\n\r\n`,
+    ),
     input.file.buffer,
     Buffer.from(`\r\n--${boundary}--\r\n`),
   ]);
   const transport = url.protocol === "https:" ? https : http;
-  return trackApiRequest("collection", () => new Promise<TeacherChallengeGradeResponse>((resolve, reject) => {
-    const request = transport.request(
-      url,
-      {
-        method: "POST",
-        rejectUnauthorized,
-        headers: {
-          Authorization: `Bearer ${key}`,
-          Accept: "application/json",
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-          "Content-Length": body.length,
-        },
-      },
-      (response) => {
-        let raw = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => { raw += chunk; });
-        response.on("end", () => {
-          let payload: unknown = {};
-          try { payload = raw.trim() ? JSON.parse(raw) : {}; } catch {}
-          const status = response.statusCode ?? 502;
-          if (status >= 400) {
-            reject(new TeacherApiError(formatTeacherApiError(payload, status), status, payload));
-            return;
-          }
-          resolve(payload as TeacherChallengeGradeResponse);
-        });
-      },
-    );
-    request.setTimeout(Math.max(defaultTimeoutMs, 180_000), () => request.destroy(new Error("Challenge scan grading timed out.")));
-    request.on("error", reject);
-    request.write(body);
-    request.end();
-  }));
+  return trackApiRequest(
+    "collection",
+    () =>
+      new Promise<TeacherChallengeGradeResponse>((resolve, reject) => {
+        const request = transport.request(
+          url,
+          {
+            method: "POST",
+            rejectUnauthorized,
+            headers: {
+              Authorization: `Bearer ${key}`,
+              Accept: "application/json",
+              "Content-Type": `multipart/form-data; boundary=${boundary}`,
+              "Content-Length": body.length,
+            },
+          },
+          (response) => {
+            let raw = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => {
+              raw += chunk;
+            });
+            response.on("end", () => {
+              let payload: unknown = {};
+              try {
+                payload = raw.trim() ? JSON.parse(raw) : {};
+              } catch {}
+              const status = response.statusCode ?? 502;
+              if (status >= 400) {
+                reject(
+                  new TeacherApiError(formatTeacherApiError(payload, status), status, payload),
+                );
+                return;
+              }
+              resolve(payload as TeacherChallengeGradeResponse);
+            });
+          },
+        );
+        request.setTimeout(Math.max(defaultTimeoutMs, 180_000), () =>
+          request.destroy(new Error("Challenge scan grading timed out.")),
+        );
+        request.on("error", reject);
+        request.write(body);
+        request.end();
+      }),
+  );
 }
 
 export const generateTeacherCollectionPaper = (
@@ -799,6 +831,7 @@ export const generateTeacherPracticePaper = (
   key: string,
   input: {
     subject: string;
+    chapters?: string[];
     bands: TeacherPracticeBand[];
     title?: string;
     instruction?: string;
@@ -862,55 +895,61 @@ export async function gradeTeacherPracticePaperFile(
   const transport = url.protocol === "https:" ? https : http;
   const timeoutMs = Math.max(defaultTimeoutMs, 120_000);
 
-  return trackApiRequest("collection", () => new Promise<ApiRecord>((resolve, reject) => {
-    const request = transport.request(
-      url,
-      {
-        method: "POST",
-        rejectUnauthorized,
-        headers: {
-          Authorization: `Bearer ${key}`,
-          Accept: "application/json",
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-          "Content-Length": body.length,
-        },
-      },
-      (response) => {
-        let raw = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => {
-          raw += chunk;
-        });
-        response.on("end", () => {
-          let payload: unknown = {};
-          if (raw.trim()) {
-            try {
-              payload = JSON.parse(raw);
-            } catch {
-              reject(
-                new TeacherApiError(
-                  `Teacher API returned invalid JSON: ${raw.slice(0, 300)}`,
-                  response.statusCode ?? 502,
-                ),
-              );
-              return;
-            }
-          }
-          const status = response.statusCode ?? 502;
-          if (status >= 400) {
-            reject(new TeacherApiError(formatTeacherApiError(payload, status), status, payload));
-            return;
-          }
-          resolve(payload as ApiRecord);
-        });
-      },
-    );
+  return trackApiRequest(
+    "collection",
+    () =>
+      new Promise<ApiRecord>((resolve, reject) => {
+        const request = transport.request(
+          url,
+          {
+            method: "POST",
+            rejectUnauthorized,
+            headers: {
+              Authorization: `Bearer ${key}`,
+              Accept: "application/json",
+              "Content-Type": `multipart/form-data; boundary=${boundary}`,
+              "Content-Length": body.length,
+            },
+          },
+          (response) => {
+            let raw = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => {
+              raw += chunk;
+            });
+            response.on("end", () => {
+              let payload: unknown = {};
+              if (raw.trim()) {
+                try {
+                  payload = JSON.parse(raw);
+                } catch {
+                  reject(
+                    new TeacherApiError(
+                      `Teacher API returned invalid JSON: ${raw.slice(0, 300)}`,
+                      response.statusCode ?? 502,
+                    ),
+                  );
+                  return;
+                }
+              }
+              const status = response.statusCode ?? 502;
+              if (status >= 400) {
+                reject(
+                  new TeacherApiError(formatTeacherApiError(payload, status), status, payload),
+                );
+                return;
+              }
+              resolve(payload as ApiRecord);
+            });
+          },
+        );
 
-    request.setTimeout(timeoutMs, () => {
-      request.destroy(new Error(`Teacher API timed out after ${timeoutMs}ms`));
-    });
-    request.on("error", reject);
-    request.write(body);
-    request.end();
-  }));
+        request.setTimeout(timeoutMs, () => {
+          request.destroy(new Error(`Teacher API timed out after ${timeoutMs}ms`));
+        });
+        request.on("error", reject);
+        request.write(body);
+        request.end();
+      }),
+  );
 }

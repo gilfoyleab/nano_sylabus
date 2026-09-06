@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { communityLearningFixture } from "../helpers/learning-database";
-const mocks = vi.hoisted(() => ({ admin: vi.fn(), access: vi.fn(), create: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  admin: vi.fn(),
+  access: vi.fn(),
+  create: vi.fn(),
+  generatePaper: vi.fn(),
+}));
 vi.mock("@/lib/supabase/admin", () => ({ createSupabaseAdminClient: mocks.admin }));
 vi.mock("@/lib/student-courses", () => ({
   getStudentCourseSubjectAccessForCourse: mocks.access,
@@ -9,8 +14,9 @@ vi.mock("@/lib/student-courses", () => ({
 vi.mock("@/lib/teacher-app/client", async (original) => ({
   ...(await original<typeof import("@/lib/teacher-app/client")>()),
   createTeacherChallenge: mocks.create,
+  generateTeacherPracticePaper: mocks.generatePaper,
 }));
-import { startStudentChallenge } from "@/lib/data/student-challenges";
+import { restartStudentChallenge, startStudentChallenge } from "@/lib/data/student-challenges";
 import { TeacherApiError } from "@/lib/teacher-app/client";
 
 describe("starting a saved syllabus challenge", () => {
@@ -53,6 +59,21 @@ describe("starting a saved syllabus challenge", () => {
         duration_minutes: 20,
       },
     });
+    mocks.generatePaper.mockResolvedValue({
+      id: "exam-1",
+      subject: "Nims",
+      questions: [
+        {
+          id: "q1",
+          text: "Explain identifiers.",
+          chapter: "Identifiers",
+          marks: 10,
+          question_type: "Short answer",
+        },
+      ],
+      total_marks: 10,
+      pass_marks: 4,
+    });
   });
 
   it("opens the published provider topic and retains its ID for progress", async () => {
@@ -60,6 +81,10 @@ describe("starting a saved syllabus challenge", () => {
     expect(mocks.create).toHaveBeenCalledWith(
       "collection",
       expect.objectContaining({ topics: ["provider-42"] }),
+    );
+    expect(mocks.generatePaper).toHaveBeenCalledWith(
+      "collection",
+      expect.objectContaining({ chapters: ["Identifiers"], pass_marks: 4 }),
     );
     expect(result?.topicKey).toBe("provider-42");
     expect(result?.content?.topicKeys).toEqual(["provider-42"]);
@@ -87,5 +112,25 @@ describe("starting a saved syllabus challenge", () => {
       "no longer have access",
     );
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("does not expose a completed challenge after its community access ends", async () => {
+    db.tables.student_challenges[0].status = "completed";
+    mocks.access.mockResolvedValue(null);
+
+    await expect(startStudentChallenge("member", "challenge-1")).rejects.toThrow(
+      "no longer have access",
+    );
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("restarts a completed challenge with a fresh sitting", async () => {
+    db.tables.student_challenges[0].status = "completed";
+
+    const result = await restartStudentChallenge("member", "challenge-1");
+
+    expect(result?.status).toBe("started");
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    expect(mocks.generatePaper).toHaveBeenCalledTimes(1);
   });
 });

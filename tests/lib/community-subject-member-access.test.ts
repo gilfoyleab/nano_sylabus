@@ -12,7 +12,8 @@ function query(data: unknown) {
     order: vi.fn(),
     maybeSingle: vi.fn(async () => result),
   };
-  for (const fn of [chain.select, chain.eq, chain.in, chain.neq, chain.order]) fn.mockReturnValue(chain);
+  for (const fn of [chain.select, chain.eq, chain.in, chain.neq, chain.order])
+    fn.mockReturnValue(chain);
   return chain;
 }
 
@@ -29,6 +30,8 @@ function fixture(membership: { status: string } | null) {
       id: "subject-1",
       folder_path: "Physics",
       external_subject_slug: "teacher_physics",
+      publication_status: "published",
+      published_at: "2026-09-06T00:00:00.000Z",
       topic_sync_status: "ready",
     }),
     community_subject_topics: query([]),
@@ -49,12 +52,22 @@ describe("community subject member visibility", () => {
       subjectId: "subject-1",
       externalSubjectSlug: "teacher_physics",
       canManage: false,
+      publicationStatus: "published",
     });
     expect(admin.from).not.toHaveBeenCalledWith("teacher_subject_profiles");
     expect(tables.community_memberships.eq).toHaveBeenCalledWith("user_id", "member-1");
     expect(tables.community_subjects.eq).toHaveBeenCalledWith("community_id", "community-1");
     expect(tables.community_subjects.eq).toHaveBeenCalledWith("status", "active");
     expect(tables.communities.eq).toHaveBeenCalledWith("status", "active");
+  });
+
+  it("keeps a draft subject hidden from community members", async () => {
+    const { admin, tables } = fixture({ status: "active" });
+    (tables.community_subjects.data as Record<string, unknown>).publication_status = "draft";
+
+    await expect(
+      getCommunitySubjectWorkspace("member-1", "engineering", "physics", admin as never),
+    ).resolves.toBeNull();
   });
 
   it.each([null, { status: "left" }])(

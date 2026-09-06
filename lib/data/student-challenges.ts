@@ -5,10 +5,11 @@ import {
 } from "@/lib/student-courses";
 import {
   createTeacherChallenge,
-  createTeacherChallengeExam,
-  submitTeacherChallengeExam,
-  submitTeacherChallengeExamFile,
+  generateTeacherPracticePaper,
+  gradeTeacherPracticePaper,
+  gradeTeacherPracticePaperFile,
   TeacherApiError,
+  type ApiRecord,
   type TeacherChallengeExam,
   type TeacherChallengeGradeResponse,
   type TeacherChallengeResponse,
@@ -217,9 +218,7 @@ export function challengeAttemptReviewFromEvaluation(
 
   return {
     attemptId,
-    handedInAt: historyRecord.handedInAt
-      ? String(historyRecord.handedInAt)
-      : createdAt || null,
+    handedInAt: historyRecord.handedInAt ? String(historyRecord.handedInAt) : createdAt || null,
     answers,
   };
 }
@@ -458,7 +457,7 @@ export async function listCompletedStudentChallenges(
   userId: string,
   page: number,
   pageSize = 5,
-  scope?: { courseId: string; subjectSlug: string },
+  scope?: { courseId: string; subjectSlug?: string },
 ) {
   const admin = createSupabaseAdminClient();
   const requestedPage = Math.max(1, Math.floor(page));
@@ -471,7 +470,8 @@ export async function listCompletedStudentChallenges(
     .order("completed_at", { ascending: false })
     .order("created_at", { ascending: false });
   if (scope) {
-    query = query.eq("course_id", scope.courseId).eq("subject_slug", scope.subjectSlug);
+    query = query.eq("course_id", scope.courseId);
+    if (scope.subjectSlug) query = query.eq("subject_slug", scope.subjectSlug);
   }
   const { data, error, count } = await query.range(from, from + pageSize - 1);
   if (isMissingChallengeTable(error)) {
@@ -501,7 +501,10 @@ export async function getStudentChallenge(userId: string, challengeId: string) {
     .eq("user_id", userId)
     .maybeSingle();
   if (error) throw error;
-  return data ? withLatestAttemptReview(userId, data as ChallengeRow) : null;
+  if (!data) return null;
+  const row = data as ChallengeRow;
+  await requireChallengeAccess(userId, row);
+  return withLatestAttemptReview(userId, row);
 }
 
 export async function getStudentChallengeGradeContext(userId: string, challengeId: string) {
@@ -515,6 +518,7 @@ export async function getStudentChallengeGradeContext(userId: string, challengeI
   if (error) throw error;
   if (!data) return null;
   const row = data as ChallengeRow;
+  await requireChallengeAccess(userId, row);
   return {
     detail: toDetail(row),
     externalPaperId: String(row.external_paper_id ?? ""),
@@ -544,7 +548,96 @@ function examQuestion(question: TeacherChallengeExam["questions"][number]): Chal
   };
 }
 
-async function resolveChallengeLane(userId: string, row: ChallengeRow) {
+function practicePaperQuestion(
+  value: unknown,
+  fallbackTopic: string,
+): ChallengeExamQuestion | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const question = value as ApiRecord;
+  const id = String(question.id || "");
+  const text = String(question.text || "");
+  if (!id || !text) return null;
+  return {
+    id,
+    question: text,
+    topic: String(question.chapter || fallbackTopic),
+    marks: number(question.marks),
+    questionType: String(question.question_type || question.band_label || "Short answer"),
+  };
+}
+
+function challengePaperBands(questions: ChallengeExamQuestion[]) {
+  const groups = new Map<
+    string,
+    { label: string; question_type: string; count: number; marks_each: number }
+  >();
+  questions.forEach((question) => {
+    const marks = question.marks || 1;
+    const questionType = question.questionType || "Short answer";
+    const key = `${questionType}:${marks}`;
+    const current = groups.get(key);
+    if (current) current.count += 1;
+    else
+      groups.set(key, {
+        label: questionType,
+        question_type: questionType,
+        count: 1,
+        marks_each: marks,
+      });
+  });
+  return [...groups.values()];
+}
+
+async function createPracticeChallengeExam(input: {
+  collectionKey: string;
+  subject: string;
+  topicTitle: string;
+  title: string;
+  durationMinutes: number;
+  passMarks: number;
+  questions: ChallengeExamQuestion[];
+}): Promise<TeacherChallengeExam> {
+  const result = (await generateTeacherPracticePaper(input.collectionKey, {
+    subject: input.subject,
+    chapters: [input.topicTitle].filter(Boolean),
+    bands: challengePaperBands(input.questions),
+    title: input.title,
+    instruction: `Keep every question strictly within ${input.topicTitle}.`,
+    pass_marks: input.passMarks,
+  })) as ApiRecord;
+  const questions = Array.isArray(result.questions)
+    ? result.questions
+        .map((question) => practicePaperQuestion(question, input.topicTitle))
+        .filter((question): question is ChallengeExamQuestion => question !== null)
+    : [];
+  const paperId = String(result.id || "");
+  if (!paperId || !questions.length) {
+    throw new Error("The course API could not prepare a handwritten challenge paper.");
+  }
+  const durationMinutes = number(result.duration_minutes) || input.durationMinutes;
+  return {
+    attempt_id: paperId,
+    subject: String(result.subject || input.subject),
+    topics: [],
+    questions: questions.map((question) => ({
+      id: question.id,
+      topic_key: "",
+      topic: question.topic,
+      marks: question.marks,
+      question_type: question.questionType,
+      text: question.question,
+    })),
+    total_marks:
+      number(result.total_marks) ||
+      questions.reduce((total, question) => total + question.marks, 0),
+    pass_marks: number(result.pass_marks) || input.passMarks,
+    duration_minutes: durationMinutes,
+    expires_at: new Date(Date.now() + durationMinutes * 60_000).toISOString(),
+    warning: typeof result.warning === "string" ? result.warning : null,
+  };
+}
+
+async function requireChallengeAccess(userId: string, row: ChallengeRow) {
   const admin = createSupabaseAdminClient();
   const courseId = row.course_id ? String(row.course_id) : null;
   const subjectSlug = String(row.subject_slug || "");
@@ -554,6 +647,12 @@ async function resolveChallengeLane(userId: string, row: ChallengeRow) {
   if (!access) {
     throw new Error("You no longer have access to the course that assigned this challenge.");
   }
+  return access;
+}
+
+async function resolveChallengeLane(userId: string, row: ChallengeRow) {
+  const admin = createSupabaseAdminClient();
+  const access = await requireChallengeAccess(userId, row);
 
   const { data: teacher, error } = await admin
     .from("teachers")
@@ -638,6 +737,7 @@ function hasLiveExam(detail: StudentChallengeDetail, externalAttemptId: string) 
   if (
     detail.content?.provider !== "collection-challenge-v1" ||
     !externalAttemptId ||
+    externalAttemptId.startsWith("chal_") ||
     !detail.content.examExpiresAt
   ) {
     return false;
@@ -654,6 +754,7 @@ function hasLiveExam(detail: StudentChallengeDetail, externalAttemptId: string) 
 export async function startStudentChallenge(
   userId: string,
   challengeId: string,
+  options: { restart?: boolean } = {},
 ): Promise<StudentChallengeDetail | null> {
   const admin = createSupabaseAdminClient();
   const { data: raw, error: loadError } = await admin
@@ -665,12 +766,15 @@ export async function startStudentChallenge(
   if (loadError) throw loadError;
   if (!raw) return null;
   const row = raw as ChallengeRow;
+  await requireChallengeAccess(userId, row);
   const current = toDetail(row);
   const externalAttemptId = String(row.external_paper_id || "");
-  if (current.status === "completed") return withLatestAttemptReview(userId, row, current);
+  if (current.status === "completed" && !options.restart) {
+    return withLatestAttemptReview(userId, row, current);
+  }
   if (hasLiveExam(current, externalAttemptId)) return current;
   if (current.content?.provider === "collection-challenge-v1") {
-    return refreshStudentChallengeExam(userId, challengeId);
+    return refreshStudentChallengeExam(userId, challengeId, { allowCompleted: options.restart });
   }
 
   const lane = await resolveChallengeLane(userId, row);
@@ -700,18 +804,31 @@ export async function startStudentChallenge(
       "This topic is not taught by the course material yet, so its challenge cannot start.",
     );
   }
-  const content = challengeContent(response, number(row.attempt_count) + 1);
   const selectedTopic = response.topics?.[0];
+  const challengeExam = await createPracticeChallengeExam({
+    collectionKey: lane.collectionKey,
+    subject: lane.subject,
+    topicTitle: selectedTopic?.title || String(row.topic_title || ""),
+    title: response.title || `Master ${selectedTopic?.title || row.topic_title || lane.subject}`,
+    durationMinutes: response.exam.duration_minutes,
+    passMarks: response.exam.pass_marks,
+    questions: (response.exam.questions || []).map(examQuestion),
+  });
+  const content = contentWithExam(
+    { ...challengeContent(response, number(row.attempt_count) + 1), examQuestions: [] },
+    challengeExam,
+    number(row.attempt_count) + 1,
+  );
   const now = new Date().toISOString();
   const { data, error } = await admin
     .from("student_challenges")
     .update({
       status: "started",
-      external_paper_id: response.exam.attempt_id,
+      external_paper_id: challengeExam.attempt_id,
       content,
-      total_marks: response.exam.total_marks,
-      pass_marks: response.exam.pass_marks,
-      duration_minutes: response.exam.duration_minutes,
+      total_marks: challengeExam.total_marks,
+      pass_marks: challengeExam.pass_marks,
+      duration_minutes: challengeExam.duration_minutes,
       ...(selectedTopic
         ? {
             topic_key: selectedTopic.topic_key,
@@ -730,8 +847,20 @@ export async function startStudentChallenge(
   return toDetail(data as ChallengeRow);
 }
 
-/** Issues a fresh in-memory sitting while retaining the durable learning steps. */
-export async function refreshStudentChallengeExam(userId: string, challengeId: string) {
+/** Reopens a completed challenge with a fresh sitting; prior attempts remain durable. */
+export async function restartStudentChallenge(userId: string, challengeId: string) {
+  const detail = await getStudentChallenge(userId, challengeId);
+  if (!detail) return null;
+  if (detail.status !== "completed") return startStudentChallenge(userId, challengeId);
+  return startStudentChallenge(userId, challengeId, { restart: true });
+}
+
+/** Issues a fresh saved paper while retaining the durable learning steps. */
+export async function refreshStudentChallengeExam(
+  userId: string,
+  challengeId: string,
+  options: { allowCompleted?: boolean } = {},
+) {
   const admin = createSupabaseAdminClient();
   const { data: raw, error: loadError } = await admin
     .from("student_challenges")
@@ -742,21 +871,22 @@ export async function refreshStudentChallengeExam(userId: string, challengeId: s
   if (loadError) throw loadError;
   if (!raw) return null;
   const row = raw as ChallengeRow;
+  await requireChallengeAccess(userId, row);
   const detail = toDetail(row);
-  if (detail.status === "completed") return detail;
+  if (detail.status === "completed" && !options.allowCompleted) return detail;
   if (detail.content?.provider !== "collection-challenge-v1") {
-    return startStudentChallenge(userId, challengeId);
+    return startStudentChallenge(userId, challengeId, { restart: options.allowCompleted });
   }
 
   const lane = await resolveChallengeLane(userId, row);
-  const exam = await createTeacherChallengeExam(lane.collectionKey, {
+  const exam = await createPracticeChallengeExam({
+    collectionKey: lane.collectionKey,
     subject: lane.subject,
-    topics:
-      detail.content.topicKeys?.filter(Boolean) ||
-      [String(row.topic_key || row.topic_title || "")].filter(Boolean),
-    questions: 2,
-    duration_minutes: detail.durationMinutes,
-    pass_percent: CHALLENGE_PASS_PERCENT,
+    topicTitle: String(row.topic_title || detail.topicTitle),
+    title: detail.title,
+    durationMinutes: detail.durationMinutes,
+    passMarks: detail.passMarks,
+    questions: detail.content.examQuestions,
   });
   if (!exam.attempt_id || !exam.questions?.length) {
     throw new Error("The course API could not issue a fresh challenge exam.");
@@ -806,12 +936,51 @@ export async function submitStudentChallengeAttempt(input: {
   const attemptId = String(row.external_paper_id || "");
   if (!attemptId) throw new Error("Start the challenge before submitting it.");
   const lane = await resolveChallengeLane(input.userId, row);
-  return submitTeacherChallengeExam(lane.collectionKey, attemptId, {
+  const graded = await gradeTeacherPracticePaper(lane.collectionKey, attemptId, {
     answers: input.answers.map((answer) => ({
       question_id: answer.questionId,
       answer_text: answer.answerText,
     })),
   });
+  return practicePaperGradeResponse(row, lane.subject, attemptId, graded);
+}
+
+function practicePaperGradeResponse(
+  row: ChallengeRow,
+  subject: string,
+  attemptId: string,
+  graded: ApiRecord,
+): TeacherChallengeGradeResponse {
+  const results = Array.isArray(graded.results)
+    ? graded.results.filter((result): result is ApiRecord =>
+        Boolean(result && typeof result === "object"),
+      )
+    : [];
+  const totalScore = number(graded.total_score);
+  const totalMarks = number(graded.total_marks) || number(row.total_marks);
+  const passMarks =
+    number(row.pass_marks) || Math.ceil(totalMarks * (CHALLENGE_PASS_PERCENT / 100));
+  return {
+    attempt_id: attemptId,
+    subject: String(row.subject_name || subject),
+    results: results.map((result) => ({
+      question_id: String(result.question_id || ""),
+      topic: String(result.chapter || ""),
+      question: String(result.question || ""),
+      marks: number(result.marks),
+      student_answer: String(result.student_answer || "[Handwritten answer]"),
+      score: number(result.score),
+      feedback: String(result.feedback || ""),
+    })),
+    total_score: totalScore,
+    total_marks: totalMarks,
+    percentage: totalMarks ? (totalScore / totalMarks) * 100 : 0,
+    pass_marks: passMarks,
+    passed: totalScore >= passMarks,
+    graded: Boolean(graded.graded),
+    stored: true,
+    evaluation: graded.evaluation as TeacherChallengeGradeResponse["evaluation"],
+  };
 }
 
 export async function submitStudentChallengeFile(input: {
@@ -833,10 +1002,11 @@ export async function submitStudentChallengeFile(input: {
   const attemptId = String(row.external_paper_id || "");
   if (!attemptId) throw new Error("Start the challenge before submitting it.");
   const lane = await resolveChallengeLane(input.userId, row);
-  return submitTeacherChallengeExamFile(lane.collectionKey, attemptId, {
+  const graded = await gradeTeacherPracticePaperFile(lane.collectionKey, attemptId, {
     studentName: input.studentName,
     file: input.file,
   });
+  return practicePaperGradeResponse(row, lane.subject, attemptId, graded);
 }
 
 export async function markStudentChallengeStep(
@@ -847,12 +1017,13 @@ export async function markStudentChallengeStep(
   const admin = createSupabaseAdminClient();
   const { data: current, error: currentError } = await admin
     .from("student_challenges")
-    .select("status, content, lesson_read_at")
+    .select("status,content,lesson_read_at,course_id,subject_slug")
     .eq("id", challengeId)
     .eq("user_id", userId)
     .maybeSingle();
   if (currentError) throw currentError;
   if (!current) return null;
+  await requireChallengeAccess(userId, current as ChallengeRow);
   if (!current.content) throw new Error("Start the challenge before saving progress.");
   if (step === "examples" && !current.lesson_read_at) {
     throw new Error("Finish the lesson before reviewing examples.");

@@ -139,6 +139,7 @@ export async function readCourseLearningTopics(
     .eq("teacher_id", teacherId)
     .eq("external_subject_slug", subjectSlug)
     .eq("status", "active")
+    .eq("publication_status", "published")
     .maybeSingle();
   if (subject.error) throw subject.error;
   if (!subject.data) return [];

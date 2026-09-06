@@ -34,6 +34,7 @@ export type PracticeAttemptSummary = {
   subjectSlug: string;
   subjectName: string;
   source: string;
+  passed: boolean;
   totalScore: number;
   totalMarks: number;
   createdAt: string;
@@ -84,9 +85,7 @@ async function storePracticeAttemptDetails(input: {
   history: PracticeAttemptHistory;
 }) {
   const { admin, attemptId, userId, history } = input;
-  const resultByQuestion = new Map(
-    history.results.map((result) => [result.question_id, result]),
-  );
+  const resultByQuestion = new Map(history.results.map((result) => [result.question_id, result]));
 
   const { error: paperError } = await admin.from("student_practice_attempt_papers").insert({
     attempt_id: attemptId,
@@ -185,7 +184,9 @@ export async function listPracticeAttempts(
   const admin = createSupabaseAdminClient();
   const { data, error } = await admin
     .from("student_practice_attempts")
-    .select("course_id, subject_slug, subject_name, source, total_score, total_marks, created_at")
+    .select(
+      "course_id, subject_slug, subject_name, source, total_score, total_marks, passed, created_at",
+    )
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -198,6 +199,7 @@ export async function listPracticeAttempts(
     subjectSlug: String(row.subject_slug ?? ""),
     subjectName: String(row.subject_name ?? ""),
     source: String(row.source ?? "practice"),
+    passed: row.passed === true,
     totalScore: Number(row.total_score ?? 0),
     totalMarks: Number(row.total_marks ?? 0),
     createdAt: String(row.created_at ?? ""),

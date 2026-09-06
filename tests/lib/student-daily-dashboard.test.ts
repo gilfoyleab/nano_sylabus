@@ -3,10 +3,38 @@ import type { CommunityHubData, CommunityHubMember } from "@/lib/data/community-
 import {
   buildDailyActivityCalendar,
   buildDailySemesters,
+  aggregateScopedPracticeActivity,
   rankDailyCommunityMembers,
 } from "@/lib/data/student-daily-dashboard";
 
 describe("student Daily Dashboard calculations", () => {
+  it("aggregates the activity calendar from only the already-scoped attempts", () => {
+    expect(
+      aggregateScopedPracticeActivity([
+        {
+          created_at: "2026-09-02T02:00:00.000Z",
+          total_score: 8,
+          total_marks: 10,
+          passed: true,
+        },
+        {
+          created_at: "2026-09-02T03:00:00.000Z",
+          total_score: 2,
+          total_marks: 10,
+          passed: false,
+        },
+      ]),
+    ).toEqual([
+      {
+        activity_date: "2026-09-02",
+        attempt_count: 2,
+        completed_count: 1,
+        graded_attempt_count: 2,
+        score_percentage_sum: 100,
+      },
+    ]);
+  });
+
   it("builds a Monday-aligned five-week calendar in Kathmandu", () => {
     const days = buildDailyActivityCalendar(
       [

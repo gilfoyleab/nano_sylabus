@@ -51,6 +51,8 @@ const community: CommunityDetail = {
               teacherId: "teacher-1",
               externalSubjectSlug: "teacher_nims",
               folderPath: "Nims",
+              publicationStatus: "published" as const,
+              publishedAt: null,
               topicSyncStatus: "ready" as const,
               topicSyncedAt: null,
             },
@@ -135,11 +137,11 @@ describe("Create Subjects community manager (server-rendered, no browser)", () =
     expect(html).not.toContain("Open subject creator");
     expect(html).not.toContain("No reusable subjects available");
     expect(html).toContain("Use an existing subject");
-    expect(html).toContain("Community members");
+    expect(html).toContain("Published · Community members");
     expect(html).not.toContain("Private");
     expect(html).not.toContain("Preview student view");
-    expect(html).toContain("Refresh challenge topics");
-    expect(html).toContain('aria-label="Refresh challenge topics for Nims"');
+    expect(html).toContain("Refresh published subject");
+    expect(html).toContain('aria-label="Refresh published subject Nims"');
   });
 
   it("makes extraction visible for newly indexed subjects without reopening the removed workspace", () => {
@@ -149,12 +151,18 @@ describe("Create Subjects community manager (server-rendered, no browser)", () =
       ...community,
       terms: community.terms.map((term) => ({
         ...term,
-        subjects: term.subjects.map((subject) => ({ ...subject, topicSyncStatus: "pending" })),
+        subjects: term.subjects.map((subject) => ({
+          ...subject,
+          publicationStatus: "draft",
+          publishedAt: null,
+          topicSyncStatus: "pending",
+        })),
       })),
     };
     const html = render({ dashboard: selected, selectedTermId: "term-3" });
-    expect(html).toContain("Extract topics for challenges");
-    expect(html).toContain("Indexing alone does not confirm topics are ready");
+    expect(html).toContain("Publish subject");
+    expect(html).toContain("Publishing extracts topics from indexed syllabus and notes");
+    expect(html).toContain("Draft · Only you");
     expect(html).toContain("Open Nims");
     expect(html).not.toContain("Subject forum");
   });
@@ -164,8 +172,8 @@ describe("Create Subjects community manager (server-rendered, no browser)", () =
     const selected = dashboard(true);
     selected.communityWorkspace = { ...community, canManage: false };
     const html = render({ dashboard: selected, selectedTermId: "term-3" });
-    expect(html).not.toContain("Refresh challenge topics");
-    expect(html).not.toContain("Extract topics for challenges");
+    expect(html).not.toContain("Refresh published subject");
+    expect(html).not.toContain("Publish subject");
   });
 
   it("does not render the intermediate workspace or admin forum for old subject URLs", () => {
@@ -178,6 +186,8 @@ describe("Create Subjects community manager (server-rendered, no browser)", () =
       canManage: true,
       folderPath: "Nims",
       externalSubjectSlug: "teacher_nims",
+      publicationStatus: "published",
+      publishedAt: null,
       topicSyncStatus: "ready",
       topicSyncError: null,
       contributionThreshold: 3,
