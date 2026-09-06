@@ -4,9 +4,37 @@ import { getCommunity } from "@/lib/data/communities";
 import { getCommunitySubjectWorkspace } from "@/lib/data/community-subjects";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { buildTeacherDashboard } from "@/lib/teacher-dashboard";
+import { orphanedCommunitySubjectIds } from "@/lib/teacher-subject-access";
 
 const classroomColumns =
   "id,subject_slug,subject_name,name,join_code,created_at,term_key,meeting_schedule,notice";
+
+async function removeOrphanedCommunitySubjects(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  teacherId: string,
+) {
+  const [profilesResult, linksResult] = await Promise.all([
+    admin.from("teacher_subject_profiles").select("subject_slug").eq("teacher_id", teacherId),
+    admin
+      .from("community_subjects")
+      .select("id,external_subject_slug")
+      .eq("teacher_id", teacherId)
+      .eq("status", "active"),
+  ]);
+  if (profilesResult.error) throw profilesResult.error;
+  if (linksResult.error) throw linksResult.error;
+
+  const subjectSlugs = new Set(
+    (profilesResult.data || [])
+      .map((row) => String(row.subject_slug || "").trim())
+      .filter(Boolean),
+  );
+  const orphanedIds = orphanedCommunitySubjectIds(linksResult.data || [], subjectSlugs);
+  if (!orphanedIds.length) return;
+
+  const cleanup = await admin.from("community_subjects").delete().in("id", orphanedIds);
+  if (cleanup.error) throw cleanup.error;
+}
 
 async function getCommunityAdminOverview(
   admin: ReturnType<typeof createSupabaseAdminClient>,
@@ -169,6 +197,10 @@ export async function GET(request: Request) {
     const searchParams = new URL(request.url).searchParams;
     const requestedCommunitySlug = searchParams.get("community")?.trim() || "";
     const requestedCommunitySubjectSlug = searchParams.get("communitySubject")?.trim() || "";
+    // Repair placements left by older delete flows before counts and semester
+    // cards are loaded. Community subjects are references to a required
+    // teacher_subject_profiles row, so an orphan cannot be opened or studied.
+    await removeOrphanedCommunitySubjects(admin, teacher.id);
     const linksResult = await admin
       .from("teacher_classroom_teachers")
       .select("classroom_id")

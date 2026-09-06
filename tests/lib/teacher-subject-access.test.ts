@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { groupSubjectCommunities, subjectAccessLabel } from "@/lib/teacher-subject-access";
+import {
+  groupSubjectCommunities,
+  orphanedCommunitySubjectIds,
+  subjectAccessLabel,
+} from "@/lib/teacher-subject-access";
 
 describe("effective creator subject access", () => {
   const shared = {
@@ -42,5 +46,18 @@ describe("effective creator subject access", () => {
   it("does not claim member access for an unattached subject", () => {
     expect(subjectAccessLabel([], "private")).toBe("Not added to a community");
     expect(subjectAccessLabel([], "public")).toBe("Public");
+  });
+
+  it("identifies stale semester cards whose creator subject was deleted", () => {
+    expect(
+      orphanedCommunitySubjectIds(
+        [
+          { id: "linked", external_subject_slug: "physics" },
+          { id: "stale", external_subject_slug: "deleted-subject" },
+          { id: "legacy-without-source", external_subject_slug: null },
+        ],
+        new Set(["physics"]),
+      ),
+    ).toEqual(["stale"]);
   });
 });
