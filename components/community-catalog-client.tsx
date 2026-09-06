@@ -143,7 +143,7 @@ function CommunityCard({
             href={`/app/communities/${community.slug}`}
             className={`inline-flex min-h-10 flex-1 items-center justify-center rounded-full border border-border bg-surface px-4 text-sm font-semibold text-text-primary transition-colors hover:bg-bg-secondary ${focusRing}`}
           >
-            Preview as student
+            Open as student
           </Link>
         ) : null}
         {joined ? (

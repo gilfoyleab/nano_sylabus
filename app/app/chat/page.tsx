@@ -22,6 +22,7 @@ export default async function ChatPage({
     semester?: string;
     librarySubject?: string;
     document?: string;
+    community?: string;
   }>;
 }) {
   const { user, profile } = await requireOnboardedUser();
@@ -51,7 +52,7 @@ export default async function ChatPage({
     listJoinedCommunities(user.id),
   ]);
 
-  const activeStudentCommunity = selectStudentCommunity(joinedCommunities);
+  const activeStudentCommunity = selectStudentCommunity(joinedCommunities, params.community);
   const libraryCommunity = activeStudentCommunity
     ? await getCommunity(activeStudentCommunity.slug, user.id)
     : null;

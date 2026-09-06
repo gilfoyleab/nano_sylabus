@@ -13,7 +13,10 @@ export default async function CommunityPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { user } = await requireOnboardedUser();
-  const [data, params] = await Promise.all([getCommunityHubForUser(user.id), searchParams]);
+  const params = await searchParams;
+  const preferredCommunity =
+    typeof params.community === "string" ? params.community.trim() : undefined;
+  const data = await getCommunityHubForUser(user.id, undefined, preferredCommunity);
   const tab = typeof params.tab === "string" ? params.tab : "overview";
   const initialSection = ["overview", "subjects", "forum", "members"].includes(tab)
     ? (tab as "overview" | "subjects" | "forum" | "members")

@@ -9,10 +9,15 @@ import { getCommunitySubjectExplorerInsights } from "@/lib/data/community-subjec
 
 export const dynamic = "force-dynamic";
 
-export default async function SubjectExplorerPage() {
+export default async function SubjectExplorerPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ community?: string }>;
+}) {
   const { user } = await requireOnboardedUser();
+  const params = await searchParams;
   const communities = await listJoinedCommunities(user.id);
-  const joinedCommunity = selectStudentCommunity(communities);
+  const joinedCommunity = selectStudentCommunity(communities, params.community);
   const community = joinedCommunity ? await getCommunity(joinedCommunity.slug, user.id) : null;
   const insights = community ? await getCommunitySubjectExplorerInsights(user.id, community) : {};
 
@@ -33,15 +38,15 @@ export default async function SubjectExplorerPage() {
               Explore your subjects
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-text-secondary">
-              Join your university community to unlock its years, semesters, and subjects.
+              Join a university community or create your own to unlock its semesters and subjects.
             </p>
           </header>
           <section className="flex min-h-96 flex-col items-center justify-center border-b border-border py-16 text-center">
             <Building2 className="size-10 text-text-muted" aria-hidden="true" />
             <h2 className="mt-4 font-display text-xl font-semibold">No subjects to explore yet</h2>
             <p className="mt-2 max-w-lg text-sm leading-6 text-text-secondary">
-              Join one community you do not manage. Its complete academic structure will appear
-              here; communities you created stay in your admin workspace.
+              Join a community or create one from the teacher workspace. Communities you own are
+              automatically available here for learning and challenges.
             </p>
             <Link
               href="/communities"

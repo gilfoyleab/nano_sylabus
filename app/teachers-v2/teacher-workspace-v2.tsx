@@ -23,7 +23,12 @@ import {
   gradeTopicEvaluation,
   scoreDistribution,
 } from "@/lib/teacher-score-insights";
-import { TEACHER_UPLOAD_MAX_LABEL, teacherUploadSizeError } from "@/lib/teacher-upload";
+import {
+  isTeacherSyllabusFileSupported,
+  TEACHER_SYLLABUS_FILE_ACCEPT,
+  TEACHER_UPLOAD_MAX_LABEL,
+  teacherUploadSizeError,
+} from "@/lib/teacher-upload";
 import { teacherLegacySubjectHref, teacherSubjectsHref } from "@/lib/teacher-subject-navigation";
 import { CommunityDeleteControl } from "@/components/community-delete-control";
 import { subjectAccessLabel, type SubjectCommunity } from "@/lib/teacher-subject-access";
@@ -9572,8 +9577,8 @@ function CreateSubjectDialog({
       setError(`${file.name}: ${sizeError}`);
       return;
     }
-    if (!/\.(pdf|doc|docx|txt|md)$/i.test(file.name)) {
-      setError("Choose a PDF, Word document, Markdown, or plain-text syllabus.");
+    if (!isTeacherSyllabusFileSupported(file.name)) {
+      setError("Choose a PDF, Word document, text file, or syllabus image.");
       return;
     }
     setError("");
@@ -9837,7 +9842,7 @@ function CreateSubjectDialog({
           <input
             id="new-subject-syllabus-file"
             type="file"
-            accept=".pdf,.doc,.docx,.txt,.md"
+            accept={TEACHER_SYLLABUS_FILE_ACCEPT}
             className="peer sr-only"
             onChange={(event) => {
               chooseSyllabusFile(event.target.files?.[0] || null);
@@ -9880,7 +9885,7 @@ function CreateSubjectDialog({
             <span className="mt-2 text-sm text-text-muted">
               {syllabusFile
                 ? `${fileSizeLabel(syllabusFile)} · Tap to replace`
-                : "PDF, Word or plain text"}
+                : "PDF, Word, text, JPG, PNG or WebP"}
             </span>
           </label>
           {syllabusFile ? (
@@ -10391,7 +10396,7 @@ function UploadDialog({
   const completedJobs = useRef<Array<{ jobId: string; fileName: string }>>([]);
   const accept =
     shelf === "Syllabus"
-      ? ".pdf,.doc,.docx,.txt,.md"
+      ? TEACHER_SYLLABUS_FILE_ACCEPT
       : ".pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.csv,.png,.jpg,.jpeg,.webp";
 
   async function submit(event: FormEvent<HTMLFormElement>) {
