@@ -1,5 +1,18 @@
 export type SubjectCommunity = { slug: string; name: string };
 
+/** Community placements cannot outlive the creator subject they reference. */
+export function orphanedCommunitySubjectIds(
+  rows: readonly Record<string, unknown>[],
+  subjectSlugs: ReadonlySet<string>,
+) {
+  return rows.flatMap((row) => {
+    const id = typeof row.id === "string" ? row.id.trim() : "";
+    const slug =
+      typeof row.external_subject_slug === "string" ? row.external_subject_slug.trim() : "";
+    return id && slug && !subjectSlugs.has(slug) ? [id] : [];
+  });
+}
+
 /** Effective member access comes from active community links, not library visibility. */
 export function groupSubjectCommunities(rows: readonly Record<string, unknown>[]) {
   const result = new Map<string, SubjectCommunity[]>();
