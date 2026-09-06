@@ -2020,7 +2020,7 @@ export function TeacherWorkspaceV2({ teacherHandle }: { teacherHandle: string })
               onSubjectRemoved={async (message) => {
                 setSelectedSlug("");
                 setToast(message);
-                await loadWorkspace();
+                await Promise.all([loadWorkspace(), loadDashboard()]);
               }}
             />
             </>

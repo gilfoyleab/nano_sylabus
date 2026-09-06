@@ -36,7 +36,9 @@ let testQueries: Record<
     delete: ReturnType<typeof vi.fn>;
     eq: ReturnType<typeof vi.fn>;
     in: ReturnType<typeof vi.fn>;
+    select: ReturnType<typeof vi.fn>;
     maybeSingle: ReturnType<typeof vi.fn>;
+    then: (resolve: (value: { data: unknown[]; error: null }) => unknown) => Promise<unknown>;
   }
 >;
 
@@ -76,6 +78,7 @@ describe("DELETE /api/teacher/subjects/[slug]", () => {
       teacher_subject_profiles: createQuery(),
       teacher_subject_syllabi: createQuery(),
       teacher_document_files: createQuery(),
+      community_subjects: createQuery(),
     };
     testQueries = queries;
     const admin = {
@@ -104,6 +107,7 @@ describe("DELETE /api/teacher/subjects/[slug]", () => {
       deleted: true,
       filesDeleted: false,
       coursesUpdated: 1,
+      communitiesUpdated: 0,
       localFilesDeleted: 0,
     });
     expect(mocks.deleteTeacherPath).not.toHaveBeenCalled();
@@ -176,11 +180,47 @@ describe("DELETE /api/teacher/subjects/[slug]", () => {
       deleted: true,
       filesDeleted: true,
       coursesUpdated: 1,
+      communitiesUpdated: 0,
       localFilesDeleted: 0,
     });
     expect(mocks.deleteTeacherSubject).not.toHaveBeenCalled();
     expect(testQueries.teacher_subject_profiles.delete).toHaveBeenCalled();
     expect(testQueries.teacher_subject_syllabi.delete).toHaveBeenCalled();
+  });
+
+  it("removes a stale community placement when the source and local profile are gone", async () => {
+    mocks.getTeacherSubjects.mockResolvedValue({ subjects: [] });
+    testQueries.community_subjects.then = (resolve) =>
+      Promise.resolve(
+        resolve({
+          data: [{ id: "community-subject-1", folder_path: "Physics" }],
+          error: null,
+        }),
+      );
+
+    const response = await DELETE(
+      new Request(
+        "http://localhost/api/teacher/subjects/ramesh-teacher-physics?deleteFiles=1",
+        { method: "DELETE" },
+      ),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      deleted: true,
+      filesDeleted: true,
+      coursesUpdated: 1,
+      communitiesUpdated: 1,
+      localFilesDeleted: 0,
+    });
+    expect(mocks.deleteTeacherSubject).not.toHaveBeenCalled();
+    expect(testQueries.community_subjects.delete).toHaveBeenCalled();
+    expect(testQueries.community_subjects.eq).toHaveBeenCalledWith("teacher_id", "teacher-1");
+    expect(testQueries.community_subjects.eq).toHaveBeenCalledWith(
+      "external_subject_slug",
+      "ramesh-teacher-physics",
+    );
   });
 
   it("blocks a slug that is not pinned inside this teacher collection", async () => {
