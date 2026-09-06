@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import { getTenantApiEnv } from "@/lib/env";
+import { teacherUploadStorageFileName } from "@/lib/teacher-upload";
 
 type ApiRecord = Record<string, unknown>;
 
@@ -10,10 +11,6 @@ export class TeacherDocumentIngestError extends Error {
     super(message);
     this.name = "TeacherDocumentIngestError";
   }
-}
-
-function safeFilename(name: string) {
-  return name.replace(/[\\/\r\n"]/g, "_").slice(0, 240) || "contribution";
 }
 
 function responseMessage(payload: unknown, fallback: string) {
@@ -83,7 +80,7 @@ export async function ingestTeacherDocument(input: {
   if (input.metadata) {
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n${JSON.stringify(input.metadata)}\r\n`));
   }
-  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFilename(input.fileName)}"\r\nContent-Type: ${input.mimeType || "application/octet-stream"}\r\n\r\n`));
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${teacherUploadStorageFileName(input.fileName)}"\r\nContent-Type: ${input.mimeType || "application/octet-stream"}\r\n\r\n`));
   parts.push(input.buffer);
   parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
   const body = Buffer.concat(parts);

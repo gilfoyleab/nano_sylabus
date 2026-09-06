@@ -487,6 +487,24 @@ export function CommunitySubjectExplorer({
         </div>
       </header>
 
+      {community.canManage ? (
+        <aside className="mt-5 flex flex-col gap-3 rounded-xl border border-border bg-bg-secondary p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold text-text-primary">Student preview</p>
+            <p className="mt-1 text-sm leading-6 text-text-secondary">
+              You are previewing your own community. It stays in Admin Workspace and is not your
+              joined learner community.
+            </p>
+          </div>
+          <Link
+            href={`/teachers?view=communities&community=${encodeURIComponent(community.slug)}`}
+            className={`inline-flex min-h-10 shrink-0 items-center justify-center rounded-full border border-border bg-bg-primary px-4 text-sm font-medium text-text-primary hover:bg-bg-tertiary ${focusRing}`}
+          >
+            Back to Admin Workspace
+          </Link>
+        </aside>
+      ) : null}
+
       {availableTerms.length > 0 ? (
         <div className="overflow-x-auto border-b border-border" aria-label="Choose semester">
           <div

@@ -1,9 +1,10 @@
 "use client";
 
-import { Target, Upload } from "lucide-react";
+import { FileCheck2, Maximize2, Minimize2, Target, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { AppShellContext } from "@/components/app-shell-context";
 import type { StudentChallengeDashboard } from "@/lib/data/student-challenge-dashboard";
 import type {
   StudentChallengeDetail,
@@ -17,6 +18,25 @@ function challengeScore(challenge: StudentChallengeSummary) {
   return Math.max(0, Math.min(100, (challenge.lastScore / challenge.lastTotalMarks) * 100));
 }
 
+/** Advance through the daily queue in its displayed order, including a partly
+ * completed challenge. Completing #1 should lead to unfinished #2, then #3. */
+export function nextAvailableChallenge(
+  challenges: StudentChallengeSummary[],
+  currentChallenge: Pick<StudentChallengeSummary, "id" | "position">,
+) {
+  // A refresh removes a completed card from the dashboard list. Positions are
+  // persisted with the daily queue, so they remain the reliable sequence even
+  // when the just-completed card is no longer in `challenges`.
+  const remaining = challenges
+    .filter((challenge) => challenge.id !== currentChallenge.id && challenge.status !== "completed")
+    .sort((left, right) => left.position - right.position);
+  return (
+    remaining.find((challenge) => challenge.position > currentChallenge.position) ??
+    remaining[0] ??
+    null
+  );
+}
+
 type GradeResult = {
   question_id: string;
   score: number;
@@ -24,10 +44,13 @@ type GradeResult = {
   feedback: string;
 };
 
-function savedAnswers(challenge: StudentChallengeDetail) {
-  return Object.fromEntries(
-    (challenge.latestAttempt?.answers ?? []).map((answer) => [answer.questionId, answer.answerText]),
-  );
+type ChallengeStep = 1 | 2 | 3 | 4;
+
+export function initialChallengeStep(challenge: StudentChallengeDetail): ChallengeStep {
+  if (challenge.status === "completed") return 4;
+  if (challenge.examplesReviewed) return 3;
+  if (challenge.lessonRead) return 2;
+  return 1;
 }
 
 function savedResults(challenge: StudentChallengeDetail): GradeResult[] {
@@ -52,34 +75,67 @@ function ChallengeDetail({
   challenge,
   onBack,
   onChange,
+  nextChallenge,
+  onNext,
 }: {
   challenge: StudentChallengeDetail;
   onBack: () => void;
   onChange: (challenge: StudentChallengeDetail) => void;
+  nextChallenge: StudentChallengeSummary | null;
+  onNext: () => Promise<boolean>;
 }) {
   const router = useRouter();
-  const [activeStep, setActiveStep] = useState<1 | 2 | 3 | 4>(() =>
-    challenge.status === "completed"
-      ? 4
-      : challenge.examplesReviewed
-        ? 3
-        : challenge.lessonRead
-          ? 2
-          : 1,
-  );
+  const { setSidebarSuppressed } = useContext(AppShellContext);
+  const enterFocusButtonRef = useRef<HTMLButtonElement>(null);
+  const exitFocusButtonRef = useRef<HTMLButtonElement>(null);
+  const answerSheetInputRef = useRef<HTMLInputElement>(null);
+  const focusModeWasActiveRef = useRef(false);
+  const incomingStep = initialChallengeStep(challenge);
+  const isCompletedChallenge = challenge.status === "completed";
+  const [focusMode, setFocusMode] = useState(false);
+  const [activeStep, setActiveStep] = useState<ChallengeStep>(() => incomingStep);
   const [savingStep, setSavingStep] = useState<"lesson" | "examples" | null>(null);
-  const [answers, setAnswers] = useState<Record<string, string>>(() => savedAnswers(challenge));
   const [scanFile, setScanFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [openingNext, setOpeningNext] = useState(false);
+  const [noNextAvailable, setNoNextAvailable] = useState(false);
   const [error, setError] = useState("");
   const [results, setResults] = useState<GradeResult[]>(() => savedResults(challenge));
-  const [score, setScore] = useState<{ earned: number; total: number; passed: boolean } | null>(() =>
-    challenge.status === "completed" && challenge.lastScore !== null && challenge.lastTotalMarks
-      ? { earned: challenge.lastScore, total: challenge.lastTotalMarks, passed: true }
-      : null,
+  const [score, setScore] = useState<{ earned: number; total: number; passed: boolean } | null>(
+    () =>
+      challenge.status === "completed" && challenge.lastScore !== null && challenge.lastTotalMarks
+        ? { earned: challenge.lastScore, total: challenge.lastTotalMarks, passed: true }
+        : null,
   );
   const [clock, setClock] = useState(() => Date.now());
   const content = challenge.content;
+
+  useEffect(() => {
+    setSidebarSuppressed(focusMode);
+    return () => setSidebarSuppressed(false);
+  }, [focusMode, setSidebarSuppressed]);
+
+  useEffect(() => {
+    if (!focusMode) return;
+    exitFocusButtonRef.current?.focus();
+    const exitOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFocusMode(false);
+    };
+    window.addEventListener("keydown", exitOnEscape);
+    return () => window.removeEventListener("keydown", exitOnEscape);
+  }, [focusMode]);
+
+  useEffect(() => {
+    if (focusMode) {
+      focusModeWasActiveRef.current = true;
+      return;
+    }
+    if (focusModeWasActiveRef.current) {
+      focusModeWasActiveRef.current = false;
+      enterFocusButtonRef.current?.focus();
+    }
+  }, [focusMode]);
 
   useEffect(() => {
     if (challenge.status === "completed" || !content?.examExpiresAt) return;
@@ -89,12 +145,25 @@ function ChallengeDetail({
 
   useEffect(() => {
     if (challenge.status !== "completed" || !challenge.latestAttempt) return;
-    setAnswers(savedAnswers(challenge));
     setResults(savedResults(challenge));
     if (challenge.lastScore !== null && challenge.lastTotalMarks) {
       setScore({ earned: challenge.lastScore, total: challenge.lastTotalMarks, passed: true });
     }
   }, [challenge]);
+
+  // The detail component remains mounted when Next changes the selected card.
+  // Reset local navigation and answer state for that new challenge instead of
+  // carrying step four (the previous challenge's submission screen) forward.
+  useEffect(() => {
+    setActiveStep(incomingStep);
+    setScanFile(null);
+    setError("");
+    setClock(Date.now());
+    if (!isCompletedChallenge) {
+      setResults([]);
+      setScore(null);
+    }
+  }, [challenge.id, incomingStep, isCompletedChallenge]);
 
   if (!content) return null;
 
@@ -116,47 +185,6 @@ function ChallengeDetail({
       return false;
     } finally {
       setSavingStep(null);
-    }
-  };
-
-  const submit = async () => {
-    setSubmitting(true);
-    setError("");
-    try {
-      const response = await fetch(`/api/student/challenges/${challenge.id}/submit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          answers: content.examQuestions.map((question) => ({
-            questionId: question.id,
-            answerText: answers[question.id]?.trim() || "",
-          })),
-        }),
-      });
-      const payload = (await response.json().catch(() => ({}))) as {
-        challenge: StudentChallengeDetail;
-        results: GradeResult[];
-        totalScore: number;
-        totalMarks: number;
-        passed: boolean;
-        error?: string;
-      };
-      if (!response.ok) {
-        if (payload.challenge) {
-          setAnswers({});
-          onChange(payload.challenge);
-        }
-        throw new Error(payload.error || "Could not grade the challenge.");
-      }
-      setResults(payload.results);
-      setScore({ earned: payload.totalScore, total: payload.totalMarks, passed: payload.passed });
-      if (!payload.passed) setAnswers({});
-      onChange(payload.challenge);
-      router.refresh();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not grade the challenge.");
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -195,7 +223,6 @@ function ChallengeDetail({
     }
   };
 
-  const allAnswered = content.examQuestions.every((question) => answers[question.id]?.trim());
   const expiresAt = Date.parse(content.examExpiresAt || "");
   const remainingSeconds = Number.isFinite(expiresAt)
     ? Math.max(0, Math.ceil((expiresAt - clock) / 1_000))
@@ -213,7 +240,6 @@ function ChallengeDetail({
       const payload = await apiJson<{ challenge: StudentChallengeDetail }>(
         await fetch(`/api/student/challenges/${challenge.id}/start`, { method: "POST" }),
       );
-      setAnswers({});
       setResults([]);
       setScore(null);
       setClock(Date.now());
@@ -222,6 +248,44 @@ function ChallengeDetail({
       setError(cause instanceof Error ? cause.message : "Could not issue a fresh exam.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const restartChallenge = async () => {
+    setRestarting(true);
+    setError("");
+    try {
+      const payload = await apiJson<{ challenge: StudentChallengeDetail }>(
+        await fetch(`/api/student/challenges/${challenge.id}/restart`, { method: "POST" }),
+      );
+      setResults([]);
+      setScore(null);
+      setClock(Date.now());
+      setActiveStep(
+        initialChallengeStep(payload.challenge),
+      );
+      onChange(payload.challenge);
+      router.refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not restart this challenge.");
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  const openNextChallenge = async () => {
+    setOpeningNext(true);
+    setError("");
+    try {
+      const opened = await onNext();
+      if (!opened) setError("Could not open the next challenge. Try again.");
+      else setNoNextAvailable(false);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Could not open the next challenge.";
+      setError(message);
+      if (message.includes("All currently extracted topics")) setNoNextAvailable(true);
+    } finally {
+      setOpeningNext(false);
     }
   };
 
@@ -242,7 +306,11 @@ function ChallengeDetail({
   const steps = [
     { number: 1, label: "Concept Reading", complete: challenge.lessonRead },
     { number: 2, label: "Solved Example", complete: challenge.examplesReviewed },
-    { number: 3, label: "Practice Question", complete: activeStep === 4 || challenge.status === "completed" },
+    {
+      number: 3,
+      label: "Practice Question",
+      complete: activeStep === 4 || challenge.status === "completed",
+    },
     { number: 4, label: "Submit Answer", complete: challenge.status === "completed" },
   ] as const;
 
@@ -250,27 +318,61 @@ function ChallengeDetail({
     "min-h-10 rounded-lg px-5 text-sm font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-secondary disabled:cursor-not-allowed disabled:opacity-50";
 
   return (
-    <main className="min-h-screen w-full bg-bg-secondary text-text-primary">
-      <div className="mx-auto max-w-5xl px-4 py-6 pb-16 sm:px-8">
-        <header className="grid grid-cols-[1fr_auto] items-start gap-4 sm:grid-cols-[auto_1fr_auto]">
-          <button
-            type="button"
-            onClick={onBack}
-            className={`${focusButtonClass} border border-border bg-card text-text-primary hover:bg-bg-primary`}
-          >
-            ← Back to Challenge Hub
-          </button>
+    <main
+      className={
+        focusMode
+          ? "fixed inset-0 z-[60] w-full overflow-y-auto overscroll-contain bg-bg-primary text-text-primary"
+          : "min-h-screen w-full bg-bg-secondary text-text-primary"
+      }
+    >
+      <div
+        className={`mx-auto px-4 py-6 sm:px-8 ${focusMode ? "max-w-3xl pb-32" : "max-w-5xl pb-16"}`}
+      >
+        <header
+          className={`grid grid-cols-[1fr_auto] items-start gap-4 sm:grid-cols-[auto_1fr_auto] ${focusMode ? "sticky top-0 z-20 -mx-4 border-b border-border bg-bg-primary/95 px-4 py-3 backdrop-blur sm:-mx-8 sm:px-8" : ""}`}
+        >
+          {focusMode ? (
+            <div className="hidden sm:block" aria-hidden="true" />
+          ) : (
+            <button
+              type="button"
+              onClick={onBack}
+              className={`${focusButtonClass} border border-border bg-card text-text-primary hover:bg-bg-primary`}
+            >
+              ← Back to Challenge Hub
+            </button>
+          )}
           <div className="hidden min-w-0 text-center sm:block">
             <p className="truncate text-xs font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">
               {challenge.subjectName} challenge
             </p>
             <h1 className="mt-1 truncate font-display text-xl font-semibold">{challenge.title}</h1>
           </div>
-          <div
-            aria-label={timeRemaining ? `${timeRemaining} remaining` : "Challenge timer"}
-            className="min-w-20 rounded-lg border border-border bg-card px-3 py-2 text-center font-mono text-sm font-semibold tabular-nums"
-          >
-            {challenge.status === "completed" ? "Done" : timeRemaining || `${challenge.durationMinutes}:00`}
+          <div className="flex items-center justify-end gap-2">
+            <div
+              aria-label={timeRemaining ? `${timeRemaining} remaining` : "Challenge timer"}
+              className="min-w-20 rounded-lg border border-border bg-card px-3 py-2 text-center font-mono text-sm font-semibold tabular-nums"
+            >
+              {challenge.status === "completed"
+                ? "Done"
+                : timeRemaining || `${challenge.durationMinutes}:00`}
+            </div>
+            <button
+              ref={focusMode ? exitFocusButtonRef : enterFocusButtonRef}
+              type="button"
+              aria-pressed={focusMode}
+              aria-label={focusMode ? "Exit focus mode" : "Enter focus mode"}
+              title={focusMode ? "Exit focus mode (Esc)" : "Enter focus mode"}
+              onClick={() => setFocusMode((current) => !current)}
+              className={`${focusButtonClass} inline-flex items-center justify-center gap-2 border border-border bg-card px-3 text-text-primary hover:bg-bg-secondary`}
+            >
+              {focusMode ? (
+                <Minimize2 className="size-4" aria-hidden="true" />
+              ) : (
+                <Maximize2 className="size-4" aria-hidden="true" />
+              )}
+              <span className="hidden md:inline">{focusMode ? "Exit focus" : "Focus mode"}</span>
+            </button>
           </div>
         </header>
 
@@ -281,48 +383,60 @@ function ChallengeDetail({
           <h1 className="mt-1 font-display text-xl font-semibold">{challenge.title}</h1>
         </div>
 
-        <nav aria-label="Challenge progress" className="mt-6 rounded-2xl border border-border bg-card px-3 py-4 sm:px-6">
-          <ol className="grid grid-cols-4">
-            {steps.map((step, index) => {
-              const isActive = activeStep === step.number;
-              return (
-                <li key={step.number} className="relative flex min-w-0 flex-col items-center text-center">
-                  {index < steps.length - 1 ? (
-                    <span
-                      aria-hidden="true"
-                      className={`absolute left-[calc(50%+18px)] right-[calc(-50%+18px)] top-4 h-px ${step.complete ? "bg-success" : "bg-border"}`}
-                    />
-                  ) : null}
-                  <button
-                    type="button"
-                    aria-current={isActive ? "step" : undefined}
-                    onClick={() => {
-                      if (step.number <= activeStep || step.complete) setActiveStep(step.number);
-                    }}
-                    className="relative z-10 flex min-h-10 min-w-10 flex-col items-center gap-1 rounded-lg px-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        {!focusMode ? (
+          <nav
+            aria-label="Challenge progress"
+            className="mt-6 rounded-2xl border border-border bg-card px-3 py-4 sm:px-6"
+          >
+            <ol className="grid grid-cols-4">
+              {steps.map((step, index) => {
+                const isActive = activeStep === step.number;
+                return (
+                  <li
+                    key={step.number}
+                    className="relative flex min-w-0 flex-col items-center text-center"
                   >
-                    <span
-                      className={`grid size-8 place-items-center rounded-full text-xs font-bold ${
-                        step.complete
-                          ? "bg-success text-white"
-                          : isActive
-                            ? "bg-blue-600 text-white"
-                            : "bg-bg-secondary text-text-muted"
-                      }`}
+                    {index < steps.length - 1 ? (
+                      <span
+                        aria-hidden="true"
+                        className={`absolute left-[calc(50%+18px)] right-[calc(-50%+18px)] top-4 h-px ${step.complete ? "bg-success" : "bg-border"}`}
+                      />
+                    ) : null}
+                    <button
+                      type="button"
+                      aria-current={isActive ? "step" : undefined}
+                      onClick={() => {
+                        if (step.number <= activeStep || step.complete) setActiveStep(step.number);
+                      }}
+                      className="relative z-10 flex min-h-10 min-w-10 flex-col items-center gap-1 rounded-lg px-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
-                      {step.complete ? "✓" : step.number}
-                    </span>
-                    <span className={`hidden text-xs font-semibold sm:block ${isActive ? "text-blue-600 dark:text-blue-400" : "text-text-muted"}`}>
-                      {step.label}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-        </nav>
+                      <span
+                        className={`grid size-8 place-items-center rounded-full text-xs font-bold ${
+                          step.complete
+                            ? "bg-success text-white"
+                            : isActive
+                              ? "bg-blue-600 text-white"
+                              : "bg-bg-secondary text-text-muted"
+                        }`}
+                      >
+                        {step.complete ? "✓" : step.number}
+                      </span>
+                      <span
+                        className={`hidden text-xs font-semibold sm:block ${isActive ? "text-blue-600 dark:text-blue-400" : "text-text-muted"}`}
+                      >
+                        {step.label}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          </nav>
+        ) : null}
 
-        <section className="mt-6 rounded-2xl border border-border bg-card p-5 sm:p-8">
+        <section
+          className={`mt-6 bg-card p-5 sm:p-8 ${focusMode ? "rounded-xl" : "rounded-2xl border border-border"}`}
+        >
           {activeStep === 1 ? (
             <div>
               <h2 className="text-xl font-semibold">📘 Key Concepts</h2>
@@ -346,14 +460,19 @@ function ChallengeDetail({
                   <h3 className="text-sm font-semibold">Before this topic</h3>
                   <ul className="mt-3 grid gap-2 sm:grid-cols-2">
                     {content.prerequisites.map((prerequisite) => (
-                      <li key={prerequisite.topicKey} className="rounded-xl bg-bg-secondary p-4 text-sm">
+                      <li
+                        key={prerequisite.topicKey}
+                        className="rounded-xl bg-bg-secondary p-4 text-sm"
+                      >
                         <div className="flex items-start justify-between gap-3">
                           <strong>{prerequisite.title}</strong>
                           <span className={prerequisite.taught ? "text-success" : "text-warning"}>
                             {prerequisite.taught ? "Available" : "Notes missing"}
                           </span>
                         </div>
-                        {prerequisite.reason ? <p className="mt-1 text-text-muted">{prerequisite.reason}</p> : null}
+                        {prerequisite.reason ? (
+                          <p className="mt-1 text-text-muted">{prerequisite.reason}</p>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
@@ -361,7 +480,8 @@ function ChallengeDetail({
               ) : null}
               {content.lesson.sources?.length ? (
                 <p className="mt-5 text-xs text-text-muted">
-                  Grounded in {content.lesson.sources.length} uploaded course {content.lesson.sources.length === 1 ? "source" : "sources"}.
+                  Grounded in {content.lesson.sources.length} uploaded course{" "}
+                  {content.lesson.sources.length === 1 ? "source" : "sources"}.
                 </p>
               ) : null}
             </div>
@@ -376,7 +496,10 @@ function ChallengeDetail({
               {content.solvedExamples.length ? (
                 <div className="mt-6 space-y-4">
                   {content.solvedExamples.map((example, index) => (
-                    <article key={`${example.question}-${index}`} className="rounded-xl border border-border bg-bg-secondary p-5">
+                    <article
+                      key={`${example.question}-${index}`}
+                      className="rounded-xl border border-border bg-bg-secondary p-5"
+                    >
                       <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
                         Example {index + 1} · {example.marks} marks
                       </p>
@@ -401,8 +524,8 @@ function ChallengeDetail({
               <h2 className="text-xl font-semibold">📝 Your Turn — Practice Question</h2>
               <p className="mt-2 text-sm text-text-muted">
                 {challenge.status === "completed"
-                  ? "Review the answers saved with your completed attempt."
-                  : "Answer below or solve on paper and upload it in the next step."}
+                  ? "Review the questions and feedback from your completed attempt."
+                  : "Write answers on paper as Q1, Q2, and so on, then upload one complete answer sheet."}
               </p>
               {challenge.status === "completed" && !challenge.latestAttempt ? (
                 <div className="mt-5 rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-text-secondary">
@@ -412,26 +535,12 @@ function ChallengeDetail({
               {content.examQuestions.length ? (
                 <div className="mt-6 space-y-5">
                   {content.examQuestions.map((question, index) => (
-                    <label key={question.id} className="block rounded-xl bg-bg-secondary p-5">
-                      <span className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+                    <article key={question.id} className="rounded-xl bg-bg-secondary p-5">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
                         Question {index + 1} · {question.marks} marks
-                      </span>
-                      <span className="mt-2 block text-sm font-semibold leading-6">{question.question}</span>
-                      <textarea
-                        rows={5}
-                        value={answers[question.id] ?? ""}
-                        readOnly={challenge.status === "completed"}
-                        disabled={submitting}
-                        aria-readonly={challenge.status === "completed"}
-                        onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))}
-                        className="mt-4 w-full rounded-xl border border-border bg-card p-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-60 read-only:bg-bg-primary"
-                        placeholder={
-                          challenge.status === "completed"
-                            ? "No typed answer was saved for this question."
-                            : "Type your answer here, or leave this blank if you will upload handwritten work."
-                        }
-                      />
-                    </label>
+                      </p>
+                      <p className="mt-2 text-sm font-semibold leading-6">{question.question}</p>
+                    </article>
                   ))}
                 </div>
               ) : (
@@ -440,73 +549,132 @@ function ChallengeDetail({
                 </div>
               )}
               <p className="mt-5 text-sm text-text-muted">
-                💡 {timeRemaining ? `You have ${timeRemaining} remaining.` : `This challenge allows ${challenge.durationMinutes} minutes.`}
+                💡{" "}
+                {timeRemaining
+                  ? `You have ${timeRemaining} remaining.`
+                  : `This challenge allows ${challenge.durationMinutes} minutes.`}
               </p>
             </div>
           ) : null}
 
           {activeStep === 4 ? (
             <div>
-              <h2 className="text-xl font-semibold">📤 Submit Your Answer</h2>
+              <h2 className="text-xl font-semibold">📤 Submit Your Answer Sheet</h2>
               <p className="mt-2 text-sm text-text-muted">
-                Submit your typed answers or upload one clear PDF or photo of your handwritten work.
+                Upload one clear PDF or photo containing all numbered answers.
               </p>
               {challenge.status !== "completed" && examExpired ? (
                 <div className="mt-6 rounded-xl border border-warning/40 bg-warning/10 p-5">
                   <p className="text-sm font-semibold">This exam session expired.</p>
-                  <button type="button" disabled={submitting} onClick={() => void refreshExam()} className={`${focusButtonClass} mt-4 bg-text-primary text-text-inverse`}>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => void refreshExam()}
+                    className={`${focusButtonClass} mt-4 bg-text-primary text-text-inverse`}
+                  >
                     {submitting ? "Issuing…" : "Get a fresh exam"}
                   </button>
                 </div>
               ) : null}
               {challenge.status !== "completed" && !examExpired ? (
                 <div className="mt-6 space-y-4">
-                  <div className="rounded-xl border-2 border-dashed border-blue-500 bg-blue-500/10 p-8 text-center sm:p-10">
-                    <Upload className="mx-auto size-8 text-blue-600 dark:text-blue-400" aria-hidden="true" />
-                    <label htmlFor={`challenge-upload-${challenge.id}`} className="mt-3 block text-sm font-semibold">
-                      Upload or take a photo
-                    </label>
-                    <p className="mt-1 text-xs text-text-muted">PDF, JPG, PNG or WebP</p>
+                  <div className="rounded-xl border-2 border-dashed border-blue-500 bg-blue-500/10 p-6 text-center sm:p-10">
+                    <Upload
+                      className="mx-auto size-8 text-blue-600 dark:text-blue-400"
+                      aria-hidden="true"
+                    />
+                    <p className="mt-3 text-sm font-semibold">
+                      Your complete handwritten answer sheet
+                    </p>
+                    <p className="mt-1 text-xs text-text-muted">
+                      Number answers as Q1, Q2, and so on · PDF, JPG, PNG or WebP · maximum 20 MB
+                    </p>
                     <input
+                      ref={answerSheetInputRef}
                       id={`challenge-upload-${challenge.id}`}
                       type="file"
                       accept="application/pdf,image/jpeg,image/png,image/webp"
-                      onChange={(event) => setScanFile(event.target.files?.[0] || null)}
-                      className="mx-auto mt-4 block w-full max-w-sm rounded-lg border border-border bg-card p-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                      disabled={submitting}
+                      onChange={(event) => {
+                        const selected = event.target.files?.[0] || null;
+                        if (selected && selected.size > 20 * 1024 * 1024) {
+                          setScanFile(null);
+                          setError("Upload an answer sheet up to 20 MB.");
+                          event.currentTarget.value = "";
+                          return;
+                        }
+                        setScanFile(selected);
+                        setError("");
+                      }}
+                      className="sr-only"
                     />
-                    <button type="button" disabled={!scanFile || submitting} onClick={() => void submitScan()} className={`${focusButtonClass} mt-4 bg-blue-600 text-white`}>
-                      {submitting ? "Reading and grading…" : "Submit handwritten answer"}
+                    {scanFile ? (
+                      <div className="mx-auto mt-5 flex max-w-md items-center gap-3 rounded-xl border border-border bg-card p-3 text-left">
+                        <FileCheck2 className="size-5 shrink-0 text-success" aria-hidden="true" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold">{scanFile.name}</p>
+                          <p className="mt-0.5 text-xs text-text-muted">
+                            {(scanFile.size / (1024 * 1024)).toFixed(1)} MB · ready to submit
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => {
+                            setScanFile(null);
+                            if (answerSheetInputRef.current) answerSheetInputRef.current.value = "";
+                          }}
+                          aria-label="Remove selected answer sheet"
+                          className="inline-flex size-10 shrink-0 items-center justify-center rounded-lg text-text-muted hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        >
+                          <X className="size-4" aria-hidden="true" />
+                        </button>
+                      </div>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => {
+                        if (!answerSheetInputRef.current) return;
+                        answerSheetInputRef.current.value = "";
+                        answerSheetInputRef.current.click();
+                      }}
+                      className={`${focusButtonClass} mt-5 inline-flex cursor-pointer items-center justify-center gap-2 border border-border bg-card text-text-primary hover:bg-bg-secondary`}
+                    >
+                      <Upload className="size-4" aria-hidden="true" />
+                      {scanFile ? "Replace answer sheet" : "Choose answer sheet"}
                     </button>
-                  </div>
-                  <div className="flex items-center gap-3" aria-hidden="true">
-                    <span className="h-px flex-1 bg-border" />
-                    <span className="text-xs font-semibold uppercase tracking-wide text-text-muted">or</span>
-                    <span className="h-px flex-1 bg-border" />
-                  </div>
-                  <div className="rounded-xl border border-border bg-bg-secondary p-5">
-                    <p className="text-sm font-semibold">Typed answers</p>
-                    <p className="mt-1 text-xs text-text-muted">
-                      {allAnswered ? "Every question has an answer and is ready for grading." : "Return to Practice Question and answer every question first."}
-                    </p>
-                    <button type="button" disabled={!allAnswered || submitting} onClick={() => void submit()} className={`${focusButtonClass} mt-4 bg-text-primary text-text-inverse`}>
-                      {submitting ? "Grading…" : challenge.attemptCount ? "Submit another attempt" : "Submit typed answers"}
+                    <button
+                      type="button"
+                      disabled={!scanFile || submitting}
+                      onClick={() => void submitScan()}
+                      className={`${focusButtonClass} mx-auto mt-3 block bg-blue-600 text-white`}
+                    >
+                      {submitting ? "Reading and grading…" : "Submit answer sheet"}
                     </button>
                   </div>
                 </div>
               ) : null}
               {score ? (
-                <div className={`mt-6 rounded-xl border p-5 ${score.passed ? "border-success/40 bg-success/10" : "border-warning/40 bg-warning/10"}`}>
+                <div
+                  className={`mt-6 rounded-xl border p-5 ${score.passed ? "border-success/40 bg-success/10" : "border-warning/40 bg-warning/10"}`}
+                >
                   <p className="font-semibold">
-                    {score.earned} / {score.total} · {score.passed ? "Challenge completed · +50 XP ✓" : "Not passed yet"}
+                    {score.earned} / {score.total} ·{" "}
+                    {score.passed ? "Challenge completed · +50 XP ✓" : "Not passed yet"}
                   </p>
                   <div className="mt-3 space-y-2 text-sm text-text-secondary">
-                    {results.map((result) => <p key={result.question_id}>{result.feedback}</p>)}
+                    {results.map((result) => (
+                      <p key={result.question_id}>{result.feedback}</p>
+                    ))}
                   </div>
                 </div>
               ) : challenge.status === "completed" ? (
                 <div className="mt-6 rounded-xl border border-success/40 bg-success/10 p-5">
                   <p className="font-semibold text-success">Challenge completed ✓</p>
-                  <p className="mt-1 text-sm text-text-secondary">Your result is saved in Challenge Hub.</p>
+                  <p className="mt-1 text-sm text-text-secondary">
+                    Your result is saved in Challenge Hub.
+                  </p>
                 </div>
               ) : null}
             </div>
@@ -514,9 +682,22 @@ function ChallengeDetail({
         </section>
 
         {content.warning ? <p className="mt-4 text-xs text-warning">{content.warning}</p> : null}
-        {error ? <p role="alert" className="mt-4 rounded-xl border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{error}</p> : null}
+        {error ? (
+          <p
+            role="alert"
+            className="mt-4 rounded-xl border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+          >
+            {error}
+          </p>
+        ) : null}
 
-        <footer className="mt-6 flex items-center justify-between gap-4">
+        <footer
+          className={
+            focusMode
+              ? "sticky bottom-0 z-20 -mx-4 mt-8 flex items-center justify-between gap-4 border-t border-border bg-bg-primary/95 px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur sm:-mx-8 sm:px-8"
+              : "mt-6 flex items-center justify-between gap-4"
+          }
+        >
           <button
             type="button"
             disabled={activeStep === 1 || submitting || savingStep !== null}
@@ -528,16 +709,46 @@ function ChallengeDetail({
           {activeStep < 4 ? (
             <button
               type="button"
-              disabled={savingStep !== null || submitting || (activeStep === 3 && !content.examQuestions.length)}
+              disabled={
+                savingStep !== null ||
+                submitting ||
+                (activeStep === 3 && !content.examQuestions.length)
+              }
               onClick={() => void goNext()}
               className={`${focusButtonClass} bg-blue-600 text-white`}
             >
               {savingStep ? "Saving…" : activeStep === 3 ? "Continue to submission →" : "Next →"}
             </button>
           ) : (
-            <button type="button" onClick={onBack} className={`${focusButtonClass} border border-border bg-card text-text-primary`}>
-              Return to Challenge Hub
-            </button>
+            <div className="flex flex-wrap justify-end gap-3">
+              <button
+                type="button"
+                disabled={restarting || openingNext}
+                onClick={() => void restartChallenge()}
+                className={`${focusButtonClass} border border-border bg-card text-text-primary hover:bg-bg-secondary`}
+              >
+                {restarting ? "Restarting…" : "Restart challenge"}
+              </button>
+              <button
+                type="button"
+                disabled={noNextAvailable || restarting || openingNext}
+                onClick={() => void openNextChallenge()}
+                title={
+                  noNextAvailable
+                    ? "All currently extracted topics already have challenges."
+                    : nextChallenge
+                      ? "Open the next available challenge"
+                      : "Find and open the next available challenge"
+                }
+                className={`${focusButtonClass} bg-blue-600 text-white hover:bg-blue-700`}
+              >
+                {openingNext
+                  ? "Opening…"
+                  : noNextAvailable
+                    ? "All challenges complete"
+                    : "Next challenge →"}
+              </button>
+            </div>
           )}
         </footer>
       </div>
@@ -591,19 +802,38 @@ export function ChallengesDashboardClient({ dashboard }: { dashboard: StudentCha
         await fetch(`/api/student/challenges/${challenge.id}/start`, { method: "POST" }),
       );
       setSelected(payload.challenge);
+      return true;
     } catch (cause) {
       setOpenError(cause instanceof Error ? cause.message : "Could not open this challenge.");
+      return false;
     } finally {
       setOpeningId("");
     }
   };
 
   if (selected) {
+    const nextChallenge = nextAvailableChallenge(dashboard.challenges, selected);
     return (
       <ChallengeDetail
         challenge={selected}
         onBack={() => setSelected(null)}
         onChange={setSelected}
+        nextChallenge={nextChallenge}
+        onNext={async () => {
+          if (nextChallenge) return openChallenge(nextChallenge);
+          const params = new URLSearchParams();
+          if (dashboard.scope) {
+            params.set("courseId", dashboard.scope.courseId);
+            params.set("subject", dashboard.scope.subjectSlug);
+          }
+          const suffix = params.size ? `?${params.toString()}` : "";
+          const payload = await apiJson<{ challenge: StudentChallengeDetail }>(
+            await fetch(`/api/student/challenges/${selected.id}/next${suffix}`, { method: "POST" }),
+          );
+          setSelected(payload.challenge);
+          router.refresh();
+          return true;
+        }}
       />
     );
   }
@@ -621,7 +851,9 @@ export function ChallengesDashboardClient({ dashboard }: { dashboard: StudentCha
                 Challenge Hub
               </h1>
               <p className="mt-1 text-sm text-text-muted">
-                Build mastery with short challenges from your course topics.
+                {dashboard.community
+                  ? `Showing only ${dashboard.community.name} subjects, progress, and history.`
+                  : "Join a community to start its challenges and track your progress."}
               </p>
             </div>
           </div>
@@ -649,7 +881,9 @@ export function ChallengesDashboardClient({ dashboard }: { dashboard: StudentCha
             <p className="mt-2 text-xs text-text-muted">
               {selectedSubject
                 ? `Showing ${selectedSubject.subjectName} challenges.`
-                : "Showing challenges across all enrolled subjects."}
+                : dashboard.community
+                  ? `Showing all ${dashboard.community.name} subjects.`
+                  : "No learner community is active."}
             </p>
           </div>
         </header>
@@ -805,13 +1039,19 @@ export function ChallengesDashboardClient({ dashboard }: { dashboard: StudentCha
               <p className="mt-2 text-sm text-text-muted">
                 {dashboard.scope
                   ? "Ask the community creator to refresh this subject's extracted topics."
-                  : "Join a community and its real micro-topics will appear here."}
+                  : dashboard.community
+                    ? `${dashboard.community.name} has no available challenges yet. Published topics will appear here automatically.`
+                    : "Join a community and its real micro-topics will appear here."}
               </p>
               <Link
-                href="/app/communities"
+                href={
+                  dashboard.community
+                    ? `/app/communities/${encodeURIComponent(dashboard.community.slug)}`
+                    : "/communities"
+                }
                 className="mt-5 inline-flex min-h-10 items-center rounded-lg bg-text-primary px-4 text-sm font-semibold text-text-inverse focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
               >
-                Browse communities
+                {dashboard.community ? "Open Subject Explorer" : "Browse communities"}
               </Link>
             </div>
           )}

@@ -4,6 +4,7 @@ import {
   communitySlug,
   generateCommunityTerms,
   mapCommunitySummary,
+  selectStudentCommunity,
 } from "@/lib/communities";
 
 describe("communities", () => {
@@ -65,6 +66,13 @@ describe("communities", () => {
     expect(communitySlug("  SEC — BEI 2026  ")).toBe("sec-bei-2026");
   });
 
+  it("selects only the external member community for the learner workspace", () => {
+    const owned = { membership: { role: "creator", status: "active" } } as const;
+    const joined = { membership: { role: "member", status: "active" } } as const;
+    expect(selectStudentCommunity([owned, joined])).toBe(joined);
+    expect(selectStudentCommunity([owned])).toBeNull();
+  });
+
   it("maps membership and counts for catalog cards", () => {
     const community = mapCommunitySummary(
       {
@@ -82,7 +90,12 @@ describe("communities", () => {
       },
       12,
       6,
-      { role: "member", status: "active", joined_at: "2026-08-30T01:00:00.000Z", current_term_id: "semester-2" },
+      {
+        role: "member",
+        status: "active",
+        joined_at: "2026-08-30T01:00:00.000Z",
+        current_term_id: "semester-2",
+      },
     );
     expect(community.memberCount).toBe(12);
     expect(community.subjectCount).toBe(6);

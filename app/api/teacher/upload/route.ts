@@ -13,6 +13,7 @@ import {
   TEACHER_UPLOAD_MAX_BYTES,
   TEACHER_UPLOAD_MAX_LABEL,
   teacherUploadSizeError,
+  teacherUploadStorageFileName,
 } from "@/lib/teacher-upload";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -196,7 +197,7 @@ async function uploadAndIndex(input: {
   }
   parts.push(
     Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeFilename(input.fileName)}"\r\nContent-Type: ${input.mimeType}\r\n\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${teacherUploadStorageFileName(input.fileName)}"\r\nContent-Type: ${input.mimeType}\r\n\r\n`,
     ),
   );
   parts.push(input.fileBuffer);
@@ -309,7 +310,7 @@ export async function POST(request: Request) {
         }
         const sizeError = teacherUploadSizeError(sizeBytes);
         if (sizeError) return NextResponse.json({ error: sizeError }, { status: 413 });
-        const storagePath = `${teacher.id}/staged/${randomUUID()}-${fileName}`;
+        const storagePath = `${teacher.id}/staged/${randomUUID()}-${teacherUploadStorageFileName(fileName)}`;
         const admin = createSupabaseAdminClient();
         const { data, error } = await admin.storage
           .from("teacher-documents")
@@ -405,7 +406,7 @@ export async function POST(request: Request) {
     });
     let previewWarning = "";
     try {
-      const storagePath = `${teacher.id}/${randomUUID()}-${safeFilename(file.name)}`;
+      const storagePath = `${teacher.id}/${randomUUID()}-${teacherUploadStorageFileName(file.name)}`;
       const admin = createSupabaseAdminClient();
       const { error } = await admin.storage
         .from("teacher-documents")

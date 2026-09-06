@@ -118,6 +118,32 @@ describe("POST /api/teacher/upload", () => {
     expect(mocks.createSignedUploadUrl).toHaveBeenCalledWith(payload.storagePath);
   });
 
+  it("uses a short ASCII-safe storage key for long filenames with spaces and punctuation", async () => {
+    const fileName =
+      "Miracle of Love _ Stories about Neem Karoli Baba -- Ram Dass; OverDrive, Inc -- Cork, 2014 -- Love Serve Remember Foundation -- isbn13 9780990631477 -- Anna’s.pdf";
+    const response = await POST(
+      new Request("http://localhost/api/teacher/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "prepare",
+          path: "Physics/Notes",
+          fileName,
+          mimeType: "application/pdf",
+          sizeBytes: 1024,
+        }),
+      }),
+    );
+    const payload = await response.json();
+    const storageFileName = String(payload.storagePath).split("/").at(-1)?.slice(37) || "";
+
+    expect(response.status).toBe(200);
+    expect(payload.storagePath).toMatch(/^teacher-1\/staged\/[a-f0-9-]+-[a-zA-Z0-9_-]+\.pdf$/);
+    expect(storageFileName.length).toBeLessThanOrEqual(120);
+    expect(payload.storagePath).not.toMatch(/[ ’;,]/);
+    expect(mocks.createSignedUploadUrl).toHaveBeenCalledWith(payload.storagePath);
+  });
+
   it("completes a signed upload and indexes the stored document", async () => {
     const calls: Array<{ path: string; authorization: string; body: string }> = [];
     const server = http.createServer((request, response) => {

@@ -70,6 +70,8 @@ export type CommunitySubject = {
   teacherId: string | null;
   externalSubjectSlug: string | null;
   folderPath: string;
+  publicationStatus: "draft" | "published";
+  publishedAt: string | null;
   topicSyncStatus: "pending" | "ready" | "empty" | "error";
   topicSyncedAt: string | null;
 };
@@ -110,6 +112,18 @@ export type CommunityDetail = CommunitySummary & {
   terms: CommunityTerm[];
   canManage: boolean;
 };
+
+/** The learner workspace is scoped to the one community joined as a member. */
+export function selectStudentCommunity<
+  T extends { membership: Pick<CommunityMembership, "role" | "status"> | null },
+>(communities: T[]): T | null {
+  return (
+    communities.find(
+      (community) =>
+        community.membership?.role === "member" && community.membership.status === "active",
+    ) || null
+  );
+}
 
 export function communitySlug(value: string) {
   return (

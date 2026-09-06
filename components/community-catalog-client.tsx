@@ -106,16 +106,19 @@ function CommunityCard({
       </div>
 
       <div className="mt-auto flex flex-wrap items-center gap-2 pt-6">
-        {joined ? (
+        {creator ? (
           <Link
-            href={
-              creator
-                ? `/teachers?view=communities&community=${encodeURIComponent(community.slug)}`
-                : `/app/communities/${community.slug}`
-            }
+            href={`/teachers?view=communities&community=${encodeURIComponent(community.slug)}`}
             className={`inline-flex min-h-10 flex-1 items-center justify-center rounded-full bg-primary px-4 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 ${focusRing}`}
           >
-            {creator ? "Open admin workspace" : "Open community"}
+            Admin workspace
+          </Link>
+        ) : joined ? (
+          <Link
+            href={`/app/communities/${community.slug}`}
+            className={`inline-flex min-h-10 flex-1 items-center justify-center rounded-full bg-primary px-4 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 ${focusRing}`}
+          >
+            Open community
           </Link>
         ) : signedIn ? (
           <button
@@ -135,6 +138,14 @@ function CommunityCard({
             Join community
           </Link>
         )}
+        {creator ? (
+          <Link
+            href={`/app/communities/${community.slug}`}
+            className={`inline-flex min-h-10 flex-1 items-center justify-center rounded-full border border-border bg-surface px-4 text-sm font-semibold text-text-primary transition-colors hover:bg-bg-secondary ${focusRing}`}
+          >
+            Preview as student
+          </Link>
+        ) : null}
         {joined ? (
           <span className="inline-flex min-h-10 items-center rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 text-xs font-medium text-emerald-300">
             {creator ? "Creator" : "Joined"}
@@ -279,6 +290,12 @@ export function CommunityCatalogClient({
             Join your university and faculty community, then study through its years, semesters, and
             subjects.
           </p>
+          {signedIn ? (
+            <p className="mt-2 max-w-2xl text-xs leading-5 text-text-secondary">
+              Your Subject Explorer follows the one community you join as a member. Communities you
+              create stay in Admin workspace and do not use that join slot.
+            </p>
+          ) : null}
         </div>
         {signedIn ? (
           <button

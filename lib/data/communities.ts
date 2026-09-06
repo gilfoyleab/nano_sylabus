@@ -111,7 +111,8 @@ async function hydrateCommunitySummaries(
       .from("community_subjects")
       .select("community_id")
       .in("community_id", ids)
-      .eq("status", "active"),
+      .eq("status", "active")
+      .eq("publication_status", "published"),
     viewerId
       ? admin
           .from("community_memberships")
@@ -226,7 +227,7 @@ async function getCommunityOnce(
     admin
       .from("community_subjects")
       .select(
-        "id,term_id,slug,name,code,description,position,teacher_id,external_subject_slug,folder_path,topic_sync_status,topic_synced_at",
+        "id,term_id,slug,name,code,description,position,teacher_id,external_subject_slug,folder_path,publication_status,published_at,topic_sync_status,topic_synced_at",
       )
       .eq("community_id", communityId)
       .eq("status", "active")
@@ -237,6 +238,7 @@ async function getCommunityOnce(
 
   const subjectsByTerm = new Map<string, CommunitySubject[]>();
   for (const item of (subjectsResult.data || []) as Record<string, unknown>[]) {
+    if (!canManage && item.publication_status !== "published") continue;
     const termId = String(item.term_id || "");
     const subject: CommunitySubject = {
       id: String(item.id || ""),
@@ -249,6 +251,8 @@ async function getCommunityOnce(
       teacherId: item.teacher_id ? String(item.teacher_id) : null,
       externalSubjectSlug: item.external_subject_slug ? String(item.external_subject_slug) : null,
       folderPath: String(item.folder_path || ""),
+      publicationStatus: item.publication_status === "published" ? "published" : "draft",
+      publishedAt: item.published_at ? String(item.published_at) : null,
       topicSyncStatus:
         item.topic_sync_status === "ready" ||
         item.topic_sync_status === "empty" ||
@@ -364,7 +368,7 @@ export async function joinCommunity(
     if (activeMembershipResult.error) throw activeMembershipResult.error;
     if (activeMembershipResult.data?.length) {
       throw new CommunityError(
-        "You already joined another community. Students can join one community at a time.",
+        "You can join one community you do not own. Communities you create do not use this slot.",
         409,
       );
     }
@@ -381,7 +385,7 @@ export async function joinCommunity(
     }
     if (result.error.code === "P0001" || result.error.code === "23505") {
       throw new CommunityError(
-        "You already joined another community. Students can join one community at a time.",
+        "You can join one community you do not own. Communities you create do not use this slot.",
         409,
       );
     }
@@ -553,6 +557,8 @@ export async function attachCommunitySubject(
     teacher_id: learning.teacher.id,
     external_subject_slug: input.subjectSlug,
     folder_path: folderPath,
+    publication_status: "draft",
+    published_at: null,
   });
   if (insertResult.error) {
     if (insertResult.error.code === "23505") {
